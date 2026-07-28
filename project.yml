@@ -1,0 +1,61 @@
+name: gudmac
+options:
+  bundleIdPrefix: com.leftshift
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: 2.6.0
+targets:
+  gudmac:
+    type: application
+    platform: macOS
+    sources:
+      - Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.leftshift.gud
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging/gudmac-Bridging-Header.h
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application: Left Shift Logical, LLC (KNBPD99JQM)"
+        DEVELOPMENT_TEAM: KNBPD99JQM
+        ENABLE_HARDENED_RUNTIME: YES
+    info:
+      path: Support/Info.plist
+      properties:
+        LSUIElement: true
+        CFBundleName: gudmac
+        NSSupportsAutomaticTermination: false
+        NSSupportsSuddenTermination: false
+        SUFeedURL: https://leftshift.com/gudmac/appcast.xml
+        SUPublicEDKey: k5bdeSR+q4Ed20LCWImOLLT6vthdxYz6SQ8KJJ6c3HU=
+        SUEnableAutomaticChecks: true
+    dependencies:
+      - sdk: IOUSBHost.framework
+      - sdk: ScreenCaptureKit.framework
+      - sdk: IOKit.framework
+      - package: Sparkle
+    scheme:
+      testTargets:
+        - gudmacTests
+  gudmacTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests
+    dependencies:
+      - target: gudmac
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_OBJC_BRIDGING_HEADER: Tests/Tests-Bridging-Header.h
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/gudmac.app/Contents/MacOS/gudmac
+        BUNDLE_LOADER: $(TEST_HOST)
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Developer ID Application: Left Shift Logical, LLC (KNBPD99JQM)"
+        DEVELOPMENT_TEAM: KNBPD99JQM

@@ -1,0 +1,7 @@
+*.xcodeproj
+Support/
+keys/
+xcuserdata/
+DerivedData/
+build/
+.DS_Store

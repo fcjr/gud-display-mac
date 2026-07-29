@@ -11,20 +11,23 @@ final class VirtualDisplayController {
     }
 
     private(set) var display: CGVirtualDisplay?
+    private var nativeSize: (width: Int, height: Int)?
 
     var displayID: CGDirectDisplayID? {
         display?.displayID
     }
 
-    // Must be called on the main queue. All device modes are registered so
-    // the user can switch resolution in System Settings; `modes` must be
-    // non-empty and the first entry is used for sizing bounds fallback.
+    // Must be called on the main queue. `modes[0]` is the panel's native mode:
+    // it determines HiDPI treatment and is selected as the active mode after
+    // creation, so the desktop really runs at the panel's resolution. Any
+    // further modes are larger fallbacks that exist only so mirroring has a
+    // shared resolution to pick (content is scaled down before transfer).
     func create(name: String,
                 modes: [Mode],
                 physicalSizeMillimeters: CGSize?,
                 serialNumber: UInt32) -> CGDirectDisplayID?
     {
-        guard !modes.isEmpty else { return nil }
+        guard let nativeMode = modes.first else { return nil }
         let maxWidth = modes.map(\.width).max()!
         let maxHeight = modes.map(\.height).max()!
 
@@ -44,8 +47,12 @@ final class VirtualDisplayController {
         let display = CGVirtualDisplay(descriptor: descriptor)
 
         let settings = CGVirtualDisplaySettings()
-        // With hiDPI enabled macOS synthesizes the scaled "looks like" variants.
-        settings.hiDPI = maxWidth >= 1920 ? 1 : 0
+        // Small panels are published as HiDPI modes: macOS refuses to bring a
+        // display online whose *point* size is tiny, but a HiDPI mode keeps
+        // the backing store at the panel's exact pixel count (336x262 pixels
+        // presented as 168x131 points) — so the panel still gets a real,
+        // unscaled, pixel-for-pixel image.
+        settings.hiDPI = 0
         settings.modes = modes.map {
             CGVirtualDisplayMode(width: UInt($0.width), height: UInt($0.height), refreshRate: $0.refreshRate)
         }
@@ -54,7 +61,57 @@ final class VirtualDisplayController {
         }
 
         self.display = display
+        self.nativeSize = (nativeMode.width, nativeMode.height)
         return display.displayID
+    }
+
+    // Call off the main thread (display registration needs main-runloop
+    // turns) and BEFORE starting capture: ScreenCaptureKit binds the display's
+    // geometry when the stream is created, so a mode or origin change
+    // afterwards leaves the stream compositing the cursor at stale
+    // coordinates.
+    func finalizeGeometry() {
+        guard let displayID = display?.displayID, let size = nativeSize else { return }
+        selectMode(width: size.width, height: size.height, on: displayID)
+        placeAdjacentToMainDisplay(displayID)
+    }
+
+    // macOS drops a new display at an arbitrary spot in the arrangement —
+    // often above-left, where windows can't easily be dragged onto it. Put it
+    // flush against the right edge of the main display instead.
+    private func placeAdjacentToMainDisplay(_ displayID: CGDirectDisplayID) {
+        let mainBounds = CGDisplayBounds(CGMainDisplayID())
+        var config: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&config) == .success else { return }
+        CGConfigureDisplayOrigin(config, displayID, Int32(mainBounds.maxX), 0)
+        CGCompleteDisplayConfiguration(config, .forSession)
+    }
+
+    // macOS may otherwise pick a synthesized scaled mode ("looks like" half
+    // size) over the panel's real one. Modes register asynchronously after
+    // applySettings, so retry until the native mode appears and sticks.
+    //
+    // Deliberately uses CGDisplaySetDisplayMode rather than a
+    // Begin/CompleteDisplayConfiguration transaction: the transactional form
+    // lets macOS re-evaluate the whole display arrangement and can promote
+    // this display to main, which yanks the menu bar onto a tiny panel.
+    @discardableResult
+    func selectMode(width: Int, height: Int, on displayID: CGDirectDisplayID) -> Bool {
+        for _ in 0..<20 {
+            if CGDisplayCopyDisplayMode(displayID)?.pixelWidth == width {
+                return true
+            }
+            // Low-resolution modes are omitted unless explicitly requested,
+            // and a small panel's native mode counts as one.
+            let options = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
+            if let modes = CGDisplayCopyAllDisplayModes(displayID, options) as? [CGDisplayMode],
+               let target = modes.first(where: { $0.pixelWidth == width && $0.pixelHeight == height })
+            {
+                CGDisplaySetDisplayMode(displayID, target, nil)
+            }
+            Thread.sleep(forTimeInterval: 0.15)
+        }
+        return CGDisplayCopyDisplayMode(displayID)?.pixelWidth == width
     }
 
     func destroy() {

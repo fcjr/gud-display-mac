@@ -15,7 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "display", accessibilityDescription: "gudmac")
+        statusItem.button?.image = NSImage(systemSymbolName: "display", accessibilityDescription: "GUD Display")
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -110,7 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(updateItem)
 
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit gudmac", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit GUD Display", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     }
 
     private func statsLine(for key: ObjectIdentifier, session: DeviceSession) -> String {

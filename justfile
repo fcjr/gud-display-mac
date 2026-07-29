@@ -1,4 +1,6 @@
-app := "build/Build/Products/Debug/gudmac.app"
+project := "GUDDisplay.xcodeproj"
+scheme := "GUDDisplay"
+app := "build/Build/Products/Debug/GUD Display.app"
 
 # List available recipes
 default:
@@ -10,19 +12,23 @@ gen:
 
 # Build the app (Debug)
 build: gen
-    xcodebuild -project gudmac.xcodeproj -scheme gudmac -configuration Debug -derivedDataPath build build
+    xcodebuild -project {{project}} -scheme {{scheme}} -configuration Debug -derivedDataPath build build
 
 # Run the protocol/pipeline test suite
 test: gen
-    xcodebuild -project gudmac.xcodeproj -scheme gudmac -derivedDataPath build test
+    xcodebuild -project {{project}} -scheme {{scheme}} -derivedDataPath build test
+
+# Build the Release app (CI signs and notarizes this)
+dist: gen
+    xcodebuild -project {{project}} -scheme {{scheme}} -configuration Release -derivedDataPath build build
 
 # Build and launch the menu-bar app
 run: build
-    open {{app}}
+    open "{{app}}"
 
 # Quit the running app
 quit:
-    -osascript -e 'quit app "gudmac"'
+    -osascript -e 'quit app "GUD Display"'
 
 # Stream the app's logs
 logs:
@@ -32,10 +38,10 @@ logs:
 icon:
     swift scripts/make_icon.swift
 
-# Notarized release build (see scripts/release.sh)
-release version:
-    ./scripts/release.sh {{version}}
+# Bump the version in project.yml (patch, minor, or major)
+bump type="patch":
+    scripts/bump-version.sh {{type}}
 
 # Remove generated project and build products
 clean:
-    rm -rf build gudmac.xcodeproj Support
+    rm -rf build GUDDisplay.xcodeproj Support

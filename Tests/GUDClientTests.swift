@@ -1,5 +1,5 @@
 import XCTest
-@testable import gudmac
+@testable import GUDDisplay
 
 final class GUDClientTests: XCTestCase {
     func testKernelGadgetInitialization() throws {

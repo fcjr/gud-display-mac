@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      # No signing identity on CI; build unsigned.
+      - name: Build and test
+        run: |
+          set -euo pipefail
+          xcodegen generate
+          xcodebuild -project GUDDisplay.xcodeproj -scheme GUDDisplay \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            test

@@ -1,4 +1,4 @@
-name: gudmac
+name: GUDDisplay
 options:
   bundleIdPrefix: com.leftshift
   deploymentTarget:
@@ -12,16 +12,22 @@ packages:
     url: https://github.com/sparkle-project/Sparkle
     from: 2.6.0
 targets:
-  gudmac:
+  GUDDisplay:
     type: application
     platform: macOS
     sources:
       - Sources
     settings:
       base:
+        # Space only in the user-visible name; scheme and Swift module stay
+        # GUDDisplay so command-line invocations need no quoting.
+        PRODUCT_NAME: GUD Display
+        PRODUCT_MODULE_NAME: GUDDisplay
+        MARKETING_VERSION: 0.1.0
+        CURRENT_PROJECT_VERSION: 1
         PRODUCT_BUNDLE_IDENTIFIER: com.leftshift.gud
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging/gudmac-Bridging-Header.h
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging/GUDDisplay-Bridging-Header.h
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "Developer ID Application: Left Shift Logical, LLC (KNBPD99JQM)"
         DEVELOPMENT_TEAM: KNBPD99JQM
@@ -30,10 +36,13 @@ targets:
       path: Support/Info.plist
       properties:
         LSUIElement: true
-        CFBundleName: gudmac
+        CFBundleName: GUD Display
+        CFBundleDisplayName: GUD Display
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSSupportsAutomaticTermination: false
         NSSupportsSuddenTermination: false
-        SUFeedURL: https://leftshift.com/gudmac/appcast.xml
+        SUFeedURL: https://raw.githubusercontent.com/fcjr/gud-display-mac/main/appcast.xml
         SUPublicEDKey: k5bdeSR+q4Ed20LCWImOLLT6vthdxYz6SQ8KJJ6c3HU=
         SUEnableAutomaticChecks: true
     dependencies:
@@ -43,19 +52,19 @@ targets:
       - package: Sparkle
     scheme:
       testTargets:
-        - gudmacTests
-  gudmacTests:
+        - GUDDisplayTests
+  GUDDisplayTests:
     type: bundle.unit-test
     platform: macOS
     sources:
       - Tests
     dependencies:
-      - target: gudmac
+      - target: GUDDisplay
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
         SWIFT_OBJC_BRIDGING_HEADER: Tests/Tests-Bridging-Header.h
-        TEST_HOST: $(BUILT_PRODUCTS_DIR)/gudmac.app/Contents/MacOS/gudmac
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/GUD Display.app/Contents/MacOS/GUD Display
         BUNDLE_LOADER: $(TEST_HOST)
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "Developer ID Application: Left Shift Logical, LLC (KNBPD99JQM)"

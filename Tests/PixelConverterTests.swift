@@ -1,6 +1,6 @@
 import CoreVideo
 import XCTest
-@testable import gudmac
+@testable import GUDDisplay
 
 final class PixelConverterTests: XCTestCase {
     // 4x2 BGRA buffer: red, green, blue, white / black, white, black, white

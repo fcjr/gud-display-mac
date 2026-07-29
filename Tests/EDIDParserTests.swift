@@ -1,5 +1,5 @@
 import XCTest
-@testable import gudmac
+@testable import GUDDisplay
 
 final class EDIDParserTests: XCTestCase {
     // Synthetic base block: one 1024x600@60-ish DTD + monitor name descriptor.

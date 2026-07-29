@@ -1,5 +1,5 @@
 import Foundation
-@testable import gudmac
+@testable import GUDDisplay
 
 // In-memory GUD device for protocol tests. Profiles model the real device
 // ecosystem: the Linux kernel gadget, samcday/gud-gadget, and gud-pico.

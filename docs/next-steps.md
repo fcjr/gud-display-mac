@@ -63,8 +63,8 @@ compression (never exercised), and EDID mode parsing (this device stalls EDID).
 - Point `SUFeedURL` at a real appcast and host it; the Sparkle key pair is
   already generated (public key in `project.yml`, private key gitignored under
   `keys/`).
-- Run `xcrun notarytool store-credentials gudmac-notary` once so
-  `scripts/release.sh` works end to end.
+- Add the Apple signing/notarization secrets to the repo so
+  the release workflow works end to end.
 - Request Apple's **Persistent Content Capture** entitlement to suppress
   macOS 15's monthly screen-recording re-approval prompt.
 - CI: `just test` in GitHub Actions would cover the protocol, pixel, EDID, and

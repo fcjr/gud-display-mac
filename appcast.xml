@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Sparkle appcast for GUD Display.
+
+  Releases are automated: run the "bump-release" workflow from the Actions
+  tab, which bumps MARKETING_VERSION in project.yml, tags vX.Y.Z, and pushes.
+  The tag triggers release.yml, which builds, notarizes, publishes the GitHub
+  release, appends an <item> here, and updates the Homebrew cask.
+
+  Item template:
+    <item>
+      <title>0.1.1</title>
+      <sparkle:version>0.1.1</sparkle:version>
+      <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Wed, 29 Jul 2026 00:00:00 +0000</pubDate>
+      <enclosure
+        url="https://github.com/fcjr/gud-display-mac/releases/download/v0.1.1/GUD-Display-0.1.1.zip"
+        sparkle:edSignature="SIGNATURE"
+        length="LENGTH"
+        type="application/octet-stream"/>
+    </item>
+-->
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>GUD Display</title>
+    <link>https://raw.githubusercontent.com/fcjr/gud-display-mac/main/appcast.xml</link>
+    <description>Updates for GUD Display for macOS</description>
+    <language>en</language>
+  </channel>
+</rss>

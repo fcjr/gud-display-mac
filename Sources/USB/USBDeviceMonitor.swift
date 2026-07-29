@@ -2,9 +2,11 @@ import Foundation
 import IOKit
 import IOKit.usb
 
-// Watches IOKit for GUD interfaces (VID 0x1d50, PID 0x614d, vendor-specific
-// class) arriving. Termination is handled per-device by the transport's
-// interest handler, not here.
+// Watches IOKit for GUD devices (VID 0x1d50, PID 0x614d) arriving. Matching
+// happens at the device level: GUD gadgets are vendor-class devices, so macOS
+// never configures them and interface nodes don't exist until the transport
+// selects a configuration itself. Termination is handled per-device by the
+// transport's interest handler, not here.
 final class USBDeviceMonitor {
     var deviceMatched: ((io_service_t) -> Void)?
 
@@ -18,10 +20,9 @@ final class USBDeviceMonitor {
         notifyPort = port
         IONotificationPortSetDispatchQueue(port, queue)
 
-        let matching = IOServiceMatching("IOUSBHostInterface")! as NSMutableDictionary
+        let matching = IOServiceMatching("IOUSBHostDevice")! as NSMutableDictionary
         matching["idVendor"] = GUD.vendorID
         matching["idProduct"] = GUD.productID
-        matching["bInterfaceClass"] = 0xff
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         let result = IOServiceAddMatchingNotification(
@@ -58,9 +59,9 @@ final class USBDeviceMonitor {
         while true {
             let service = IOIteratorNext(iterator)
             guard service != 0 else { break }
+            // Ownership of the iterator's +1 reference transfers to the
+            // callback (which may consume it asynchronously).
             deviceMatched?(service)
-            // The transport retains the service itself; drop our reference.
-            IOObjectRelease(service)
         }
     }
 }

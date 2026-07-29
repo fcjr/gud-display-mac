@@ -16,6 +16,11 @@ enum GUDClientError: Error {
 final class GUDDeviceClient {
     private let transport: GUDTransport
     private let log = Logger(subsystem: "com.leftshift.gud", category: "protocol")
+    // All device IO must be strictly serialized (the Linux host's ctrl_lock/
+    // buf_lock): concurrent EP0 SETUP packets wedge real gadget firmware.
+    // Recursive because flush() holds it across SET_BUFFER + bulk, and error
+    // paths issue GET_STATUS while inside a request.
+    private let ioLock = NSRecursiveLock()
 
     private(set) var descriptor: GUD.DisplayDescriptor?
     private(set) var formats: [GUD.PixelFormat] = []
@@ -33,7 +38,19 @@ final class GUDDeviceClient {
     // MARK: Initialization sequence
 
     func initialize() throws {
-        let raw = try controlIn(.getDescriptor, length: GUD.DisplayDescriptor.byteSize)
+        // Devices can stall EP0 briefly while their firmware settles after
+        // SET_CONFIGURATION (observed on real hardware); retry with backoff.
+        var raw = Data()
+        for attempt in 0..<5 {
+            do {
+                raw = try controlIn(.getDescriptor, length: GUD.DisplayDescriptor.byteSize)
+                break
+            } catch {
+                guard attempt < 4 else { throw error }
+                log.info("GET_DESCRIPTOR attempt \(attempt + 1) failed; retrying")
+                Thread.sleep(forTimeInterval: 0.25)
+            }
+        }
         guard let descriptor = GUD.DisplayDescriptor(parsing: raw) else {
             throw GUDClientError.malformedResponse
         }
@@ -63,6 +80,11 @@ final class GUDDeviceClient {
                 GUD.Property(parsing: data, at: $0)
             }
         }
+    }
+
+    // Cheap EP0 liveness check (GET_DESCRIPTOR is supported by every device).
+    func ping() throws {
+        _ = try controlIn(.getDescriptor, length: GUD.DisplayDescriptor.byteSize)
     }
 
     // MARK: Connector queries
@@ -120,6 +142,8 @@ final class GUDDeviceClient {
     func flush(x: Int, y: Int, width: Int, height: Int,
                uncompressedLength: Int, payload: NSMutableData, compressed: Bool) throws
     {
+        ioLock.lock()
+        defer { ioLock.unlock() }
         let header = GUD.SetBufferHeader(
             x: UInt32(x), y: UInt32(y),
             width: UInt32(width), height: UInt32(height),
@@ -140,6 +164,8 @@ final class GUDDeviceClient {
     // MARK: Control plumbing
 
     private func controlIn(_ request: GUD.Request, connector: Int = 0, length: Int) throws -> Data {
+        ioLock.lock()
+        defer { ioLock.unlock() }
         do {
             return try transport.controlIn(request: request.rawValue, wValue: UInt16(connector), length: UInt16(length))
         } catch {
@@ -148,6 +174,8 @@ final class GUDDeviceClient {
     }
 
     private func controlOut(_ request: GUD.Request, connector: Int = 0, data: Data?) throws {
+        ioLock.lock()
+        defer { ioLock.unlock() }
         do {
             try transport.controlOut(request: request.rawValue, wValue: UInt16(connector), data: data)
         } catch {
@@ -160,8 +188,9 @@ final class GUDDeviceClient {
 
     // On a failed/stalled request the device reports why via GET_STATUS.
     private func mappedError(_ error: Error, request: GUD.Request) -> Error {
+        log.error("Request \(String(describing: request), privacy: .public) failed: \((error as NSError).domain, privacy: .public) 0x\(String(UInt32(bitPattern: Int32((error as NSError).code)), radix: 16), privacy: .public)")
         if request != .getStatus, let status = try? readStatus(), status != .ok {
-            log.error("Request \(String(describing: request)) failed with device status \(status.rawValue)")
+            log.error("Device status after failed \(String(describing: request)): \(status.rawValue)")
             return GUDClientError.deviceStatus(status)
         }
         return GUDClientError.transport(error)

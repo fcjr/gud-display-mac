@@ -18,8 +18,17 @@ extern NSErrorDomain const GUDUSBTransportErrorDomain;
 /// Interface number of the claimed USB interface (used as wIndex in control requests).
 @property(readonly, nonatomic) uint8_t interfaceNumber;
 
-/// Claims the IOUSBHostInterface for the given service and locates the bulk OUT pipe.
-/// The service must be an IOUSBHostInterface with bInterfaceClass 0xFF.
+/// USB link speed reported by IOKit (0 low, 1 full, 2 high, 3 super, ...).
+/// Bounds how much framebuffer traffic the device can possibly absorb.
+@property(readonly, nonatomic) NSInteger deviceSpeed;
+
+/// wMaxPacketSize of the bulk OUT endpoint.
+@property(readonly, nonatomic) NSUInteger bulkMaxPacketSize;
+
+/// Claims the IOUSBHostDevice for the given service, ensures a configuration
+/// is selected (GUD gadgets report bDeviceClass 0xFF, so macOS's composite
+/// driver never configures them and no interface nodes exist until we do),
+/// then claims the vendor-specific interface and locates its bulk OUT pipe.
 - (nullable instancetype)initWithService:(io_service_t)service
                       terminationHandler:(void (^)(void))terminationHandler
                                    error:(NSError **)error;
@@ -39,6 +48,11 @@ extern NSErrorDomain const GUDUSBTransportErrorDomain;
 /// Synchronous bulk OUT transfer of the entire buffer. The buffer is used
 /// directly for IO (no copy); callers should reuse one buffer across flushes.
 - (BOOL)bulkWrite:(NSMutableData *)data error:(NSError **)error;
+
+/// Resets and re-enumerates the device (recovery for wedged firmware).
+/// The current services terminate — the termination handler will fire — and
+/// the device re-registers as a new service for fresh matching.
+- (BOOL)resetDeviceWithError:(NSError **)error;
 
 /// Releases the interface. Safe to call more than once.
 - (void)invalidate;

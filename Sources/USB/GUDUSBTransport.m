@@ -13,6 +13,7 @@ static const NSTimeInterval kControlTimeout = 5.0;
 static const NSTimeInterval kBulkTimeout = 3.0;
 
 @implementation GUDUSBTransport {
+    IOUSBHostDevice *_device;
     IOUSBHostInterface *_interface;
     IOUSBHostPipe *_bulkOut;
     void (^_terminationHandler)(void);
@@ -29,7 +30,7 @@ static const NSTimeInterval kBulkTimeout = 3.0;
 
     _terminationHandler = [terminationHandler copy];
     __weak GUDUSBTransport *weakSelf = self;
-    _interface = [[IOUSBHostInterface alloc]
+    _device = [[IOUSBHostDevice alloc]
         initWithIOService:service
                   options:(IOUSBHostObjectInitOptions)0
                     queue:nil
@@ -42,11 +43,51 @@ static const NSTimeInterval kBulkTimeout = 3.0;
                   }
               }
           }];
+    if (!_device) {
+        return nil;
+    }
+
+    // GUD gadgets are vendor-class at the device level, so no macOS driver
+    // configures them (Linux's usbcore always does — this is the one host
+    // duty macOS leaves to us). matchInterfaces publishes the interface nodes.
+    if (_device.configurationDescriptor == NULL) {
+        if (![_device configureWithValue:1 matchInterfaces:YES error:error]) {
+            [_device destroy];
+            _device = nil;
+            return nil;
+        }
+    }
+
+    io_service_t interfaceService = [self copyVendorInterfaceServiceForDevice:service];
+    if (interfaceService == IO_OBJECT_NULL) {
+        if (error) {
+            *error = [NSError errorWithDomain:GUDUSBTransportErrorDomain
+                                         code:3
+                                     userInfo:@{NSLocalizedDescriptionKey : @"Vendor interface did not appear after configuration"}];
+        }
+        [_device destroy];
+        _device = nil;
+        return nil;
+    }
+
+    _interface = [[IOUSBHostInterface alloc]
+        initWithIOService:interfaceService
+                  options:(IOUSBHostObjectInitOptions)0
+                    queue:nil
+                    error:error
+          interestHandler:nil];
+    IOObjectRelease(interfaceService);
     if (!_interface) {
+        [_device destroy];
+        _device = nil;
         return nil;
     }
 
     _interfaceNumber = _interface.interfaceDescriptor->bInterfaceNumber;
+
+    NSNumber *speed = CFBridgingRelease(IORegistryEntrySearchCFProperty(
+        service, kIOServicePlane, CFSTR("Device Speed"), kCFAllocatorDefault, kIORegistryIterateRecursively));
+    _deviceSpeed = speed ? speed.integerValue : -1;
 
     const IOUSBConfigurationDescriptor *config = _interface.configurationDescriptor;
     const IOUSBInterfaceDescriptor *interfaceDescriptor = _interface.interfaceDescriptor;
@@ -57,6 +98,7 @@ static const NSTimeInterval kBulkTimeout = 3.0;
         BOOL isBulk = (endpoint->bmAttributes & 0x03) == 0x02;
         if (isOut && isBulk) {
             _bulkOut = [_interface copyPipeWithAddress:endpoint->bEndpointAddress error:error];
+            _bulkMaxPacketSize = endpoint->wMaxPacketSize & 0x7ff;
             break;
         }
     }
@@ -66,12 +108,37 @@ static const NSTimeInterval kBulkTimeout = 3.0;
                                          code:1
                                      userInfo:@{NSLocalizedDescriptionKey : @"No bulk OUT endpoint on GUD interface"}];
         }
-        [_interface destroy];
-        _interface = nil;
+        [self invalidate];
         return nil;
     }
 
     return self;
+}
+
+// The interface nodes register asynchronously after configuration; poll the
+// device's registry children briefly for the vendor-specific interface.
+- (io_service_t)copyVendorInterfaceServiceForDevice:(io_service_t)deviceService
+{
+    for (int attempt = 0; attempt < 40; attempt++) {
+        io_iterator_t iterator = IO_OBJECT_NULL;
+        if (IORegistryEntryGetChildIterator(deviceService, kIOServicePlane, &iterator) == KERN_SUCCESS) {
+            io_service_t child;
+            while ((child = IOIteratorNext(iterator)) != IO_OBJECT_NULL) {
+                if (IOObjectConformsTo(child, "IOUSBHostInterface")) {
+                    NSNumber *interfaceClass = CFBridgingRelease(IORegistryEntryCreateCFProperty(
+                        child, CFSTR("bInterfaceClass"), kCFAllocatorDefault, 0));
+                    if (interfaceClass.unsignedIntValue == 0xff) {
+                        IOObjectRelease(iterator);
+                        return child;
+                    }
+                }
+                IOObjectRelease(child);
+            }
+            IOObjectRelease(iterator);
+        }
+        usleep(50 * 1000);
+    }
+    return IO_OBJECT_NULL;
 }
 
 - (void)dealloc
@@ -147,11 +214,18 @@ static const NSTimeInterval kBulkTimeout = 3.0;
     return YES;
 }
 
+- (BOOL)resetDeviceWithError:(NSError **)error
+{
+    return [_device resetWithError:error];
+}
+
 - (void)invalidate
 {
     _bulkOut = nil;
     [_interface destroy];
     _interface = nil;
+    [_device destroy];
+    _device = nil;
 }
 
 @end

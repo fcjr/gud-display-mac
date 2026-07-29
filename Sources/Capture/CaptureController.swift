@@ -24,8 +24,17 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     private let sampleQueue = DispatchQueue(label: "com.leftshift.gud.capture")
 
     func start(displayID: CGDirectDisplayID, pixelWidth: Int, pixelHeight: Int, maxFrameRate: Int = 60) async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        guard let scDisplay = content.displays.first(where: { $0.displayID == displayID }) else {
+        stop() // replace any existing stream (capture restarts on reconfiguration)
+        // A freshly created virtual display takes a moment to appear in the
+        // shareable-content snapshot; poll briefly.
+        var scDisplay: SCDisplay?
+        for _ in 0..<20 {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            scDisplay = content.displays.first { $0.displayID == displayID }
+            if scDisplay != nil { break }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        guard let scDisplay else {
             throw CaptureError.displayNotFound
         }
 

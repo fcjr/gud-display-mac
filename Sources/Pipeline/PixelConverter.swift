@@ -18,10 +18,12 @@ struct DamageRect {
     }
 
     // Sub-byte formats require the rect to start and end on byte boundaries
-    // (the Linux host aligns x down the same way).
+    // (the Linux host aligns x down the same way). Multi-byte formats get
+    // 4-pixel alignment so the device's row offsets (x * bytesPerPixel) and
+    // transfer lengths stay word-aligned — MCU firmware doing 32-bit copies
+    // can fault on unaligned addresses, which wedges the device.
     func aligned(for format: GUD.PixelFormat, fbWidth: Int) -> DamageRect {
-        let group = format.pixelsPerByteGroup
-        guard group > 1 else { return self }
+        let group = max(format.pixelsPerByteGroup, 4)
         let x0 = (x / group) * group
         let x1 = min(fbWidth, ((x + width + group - 1) / group) * group)
         return DamageRect(x: x0, y: y, width: x1 - x0, height: height)
@@ -67,6 +69,38 @@ enum PixelConverter {
             convertRow(from: srcRow, to: dstRow, pixels: rect.width, format: format)
         }
         return true
+    }
+
+    // Diagnostic frame that makes transfer bugs self-evident on the panel:
+    //   corner colors  -> orientation / flips / channel order
+    //   vertical bars  -> row pitch (wrong stride shears them into diagonals)
+    //   diagonal line  -> combined width/pitch errors
+    static func testPattern(width: Int, height: Int, format: GUD.PixelFormat, into out: NSMutableData) {
+        let pitch = format.minPitch(width: width)
+        out.length = pitch * height
+        let dst = out.mutableBytes
+        var row = [UInt8](repeating: 255, count: width * 4)
+
+        for y in 0..<height {
+            for x in 0..<width {
+                var r: UInt8 = 0, g: UInt8 = 0, b: UInt8 = 0
+                switch (y < height / 2, x < width / 2) {
+                case (true, true): r = 255                       // top-left    red
+                case (true, false): g = 255                      // top-right   green
+                case (false, true): b = 255                      // bottom-left blue
+                case (false, false): (r, g, b) = (255, 255, 255) // bottom-right white
+                }
+                if x % 32 == 0 || y % 32 == 0 { (r, g, b) = (0, 0, 0) }
+                if x == y { (r, g, b) = (255, 255, 0) }
+                row[x * 4 + 0] = b
+                row[x * 4 + 1] = g
+                row[x * 4 + 2] = r
+                row[x * 4 + 3] = 255
+            }
+            row.withUnsafeBytes { src in
+                convertRow(from: src.baseAddress!, to: dst + y * pitch, pixels: width, format: format)
+            }
+        }
     }
 
     private static func convertRow(from src: UnsafeRawPointer, to dst: UnsafeMutableRawPointer, pixels: Int, format: GUD.PixelFormat) {

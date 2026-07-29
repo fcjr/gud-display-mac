@@ -62,16 +62,29 @@ final class PixelConverterTests: XCTestCase {
         XCTAssertEqual(Array(bytes.dropFirst(4).prefix(3)), [255, 255, 255])
     }
 
-    func testSubByteAlignment() {
+    func testDamageAlignment() {
         let rect = DamageRect(x: 3, y: 0, width: 6, height: 1)
+
+        // R1 packs 8 pixels per byte, so it needs the widest grouping.
         let alignedR1 = rect.aligned(for: .r1, fbWidth: 64)
         XCTAssertEqual(alignedR1.x, 0)
         XCTAssertEqual(alignedR1.width, 16)
-        let alignedNibble = rect.aligned(for: .xrgb1111, fbWidth: 64)
-        XCTAssertEqual(alignedNibble.x, 2)
-        XCTAssertEqual(alignedNibble.width, 8)
-        let untouched = rect.aligned(for: .rgb565, fbWidth: 64)
-        XCTAssertEqual(untouched.x, 3)
-        XCTAssertEqual(untouched.width, 6)
+
+        // Every other format aligns to 4 pixels so row offsets and transfer
+        // lengths stay word-aligned for the device.
+        for format in [GUD.PixelFormat.xrgb1111, .rgb565, .rgb888, .xrgb8888] {
+            let aligned = rect.aligned(for: format, fbWidth: 64)
+            XCTAssertEqual(aligned.x, 0, "\(format) x")
+            XCTAssertEqual(aligned.width, 12, "\(format) width")
+            XCTAssertEqual(aligned.x % 4, 0)
+            XCTAssertEqual(aligned.width % 4, 0)
+        }
+    }
+
+    func testAlignmentClampsToFramebuffer() {
+        let rect = DamageRect(x: 60, y: 0, width: 3, height: 1)
+        let aligned = rect.aligned(for: .rgb888, fbWidth: 63)
+        XCTAssertEqual(aligned.x, 60)
+        XCTAssertLessThanOrEqual(aligned.x + aligned.width, 63)
     }
 }

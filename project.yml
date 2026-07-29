@@ -32,6 +32,13 @@ targets:
         CODE_SIGN_IDENTITY: "Developer ID Application: Left Shift Logical, LLC (KNBPD99JQM)"
         DEVELOPMENT_TEAM: KNBPD99JQM
         ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: Signing/GUDDisplay.entitlements
+      configs:
+        # Xcode injects get-task-allow into the base entitlements; harmless in
+        # Debug (it is what lets a debugger attach) but notarization rejects
+        # any binary that requests it, so Release signs the file as-is.
+        Release:
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
     info:
       path: Support/Info.plist
       properties:

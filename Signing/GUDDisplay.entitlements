@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Deliberately empty.
+
+  The app is not sandboxed, and nothing it does needs an entitlement:
+
+    IOUSBHost      - a vendor-specific (0xFF) interface is claimed by no
+                     kernel driver, so opening it exclusively needs no
+                     entitlement and no root. Device *capture* would need
+                     com.apple.vm.device-access, which GUD devices never
+                     require.
+    ScreenCaptureKit - gated by TCC (Screen Recording) at runtime, not by an
+                     entitlement.
+    CGVirtualDisplay - private CoreGraphics SPI; resolved at runtime.
+    Sparkle        - needs extra entitlements only in sandboxed apps.
+
+  Kept as a file so additions are explicit and reviewable, and so Release
+  builds sign against a known-empty set rather than Xcode's injected
+  defaults (which include get-task-allow and fail notarization).
+-->
+<plist version="1.0">
+<dict/>
+</plist>

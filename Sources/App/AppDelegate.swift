@@ -38,6 +38,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Devices
 
     private func attach(service: io_service_t) {
+        // Balances the iterator reference handed over by USBDeviceMonitor;
+        // the transport holds its own reference by the time this returns.
+        defer { IOObjectRelease(service) }
         guard let session = DeviceSession(service: service) else { return }
         let key = ObjectIdentifier(session)
         sessions[key] = session

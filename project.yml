@@ -20,6 +20,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.leftshift.gud
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging/gudmac-Bridging-Header.h
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "Developer ID Application: Left Shift Logical, LLC (KNBPD99JQM)"

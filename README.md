@@ -4,7 +4,7 @@ A DisplayLink-style macOS driver for [GUD (Generic USB Display)](https://github.
 
 Installs as a menubar application & does userspace screen capture -> usb.
 
-Built for use with the [RCade](https://github.com/fcjr/rcade) driver by [scd13](https://www.scd31.com/posts/building-an-arcade-display-adapter), and a few other boards she is cooking up.
+Built for use with the [RCade](https://github.com/fcjr/rcade) driver by [scd31](https://www.scd31.com/posts/building-an-arcade-display-adapter), and a few other boards she is cooking up.
 
 ## Install (soon, not yet released)
 

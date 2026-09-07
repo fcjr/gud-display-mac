@@ -35,10 +35,11 @@ final class DeviceSession {
     private var recovering = false
     private var resetAttempts = 0
     private var displayRecreations = 0
-    private var loggedFrameGeometry = false
+    private var lastFrameGeometry: (width: Int, height: Int, stride: Int, fourCC: OSType)?
     private var lastFlushAt = Date.distantPast
     private var flushDurationEMA: Double = 0
     private var currentMaxFrameRate = 60
+    private var lastRateAdjustAt = Date.distantPast
     // Hard ceiling on capture rate (defaults write com.leftshift.gud MaxFrameRate N).
     // Some firmware crashes under sustained full-rate streaming regardless of
     // USB flow control; this bounds the adaptive throttle.
@@ -121,9 +122,12 @@ final class DeviceSession {
 
     private func configureConnector() throws {
         let edidInfo = (try? client.edid(forConnector: connectorIndex)).flatMap(EDIDParser.parse)
-        if let name = edidInfo?.name {
-            displayName = name
-        }
+        // Prefer the connected monitor's name; fixed panels without EDID
+        // can still identify themselves through the USB product string.
+        displayName = [edidInfo?.name, transport.productName]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? "GUD Display"
+        log.info("Display name: \(self.displayName, privacy: .public)")
 
         // Device mode list wins; EDID modes are the fallback for EDID-only devices.
         var modes = try client.modes(forConnector: connectorIndex)
@@ -155,34 +159,51 @@ final class DeviceSession {
         fbWidth = Int(mode.hdisplay)
         fbHeight = Int(mode.vdisplay)
 
-        // The display runs at the panel's real resolution: a 336x262 panel is
-        // a 336x262 desktop, pixel for pixel, no scaling in the path.
+        // Modes the panel can actually run; the desktop is captured at the
+        // panel's size and downscaled from whatever mode the display sits in.
+        let deviceModes = availableModes.map {
+            VirtualDisplayController.Mode(width: Int($0.hdisplay), height: Int($0.vdisplay), refreshRate: mode.refreshRate)
+        }
+        let native = deviceModes[0]
+        // macOS treats modes narrower than 800 px as "low resolution": it
+        // never selects one while a larger mode exists, and System Settings
+        // hides a display sitting in one. A small panel therefore gets a
+        // desktop mode at the smallest aspect-preserving size that is 800 px
+        // wide, and the desktop is downscaled into the panel.
         //
+        //   defaults write com.leftshift.gud NativeResolution -bool YES
+        // keeps the desktop pixel for pixel at the panel's size instead. The
+        // display then disappears from System Settings; the 640x480 companion
+        // exists only because macOS will not bring a display online below
+        // roughly that size.
+        var desktop = native
+        var companion: [VirtualDisplayController.Mode] = []
+        if fbWidth < 800 {
+            if UserDefaults.standard.bool(forKey: "NativeResolution") {
+                companion = [VirtualDisplayController.Mode(width: 640, height: 480, refreshRate: 60)]
+            } else {
+                let height = (800 * fbHeight / fbWidth + 1) / 2 * 2
+                desktop = VirtualDisplayController.Mode(width: 800, height: height, refreshRate: 60)
+                companion = [desktop]
+            }
+        }
         // Larger modes are opt-in via
         //   defaults write com.leftshift.gud ScaledModes -bool YES
         // They only exist to give mirroring a shared resolution to pick
         // (macOS otherwise drags every mirrored display down to the panel's
         // mode); their content is downscaled before transfer.
-        let deviceModes = availableModes.map {
-            VirtualDisplayController.Mode(width: Int($0.hdisplay), height: Int($0.vdisplay), refreshRate: mode.refreshRate)
-        }
-        // macOS will not bring a display online below roughly 640x480, so a
-        // small panel needs at least one larger companion mode to exist at
-        // all; the native mode is then selected explicitly.
-        let companion = fbWidth < 640
-            ? [VirtualDisplayController.Mode(width: 640, height: 480, refreshRate: 60)]
-            : []
         let scaledModes = UserDefaults.standard.bool(forKey: "ScaledModes")
             ? Self.standardModes
-                .filter { $0.width > fbWidth }
+                .filter { $0.width > max(fbWidth, desktop.width) }
                 .map { VirtualDisplayController.Mode(width: $0.width, height: $0.height, refreshRate: 60) }
-            : companion
+            : []
 
         var displayID: CGDirectDisplayID?
         DispatchQueue.main.sync {
             displayID = virtualDisplay.create(
                 name: displayName,
-                modes: deviceModes + scaledModes,
+                modes: deviceModes + companion + scaledModes,
+                desktop: desktop,
                 physicalSizeMillimeters: edidInfo?.physicalSizeMillimeters,
                 serialNumber: 1
             )
@@ -201,7 +222,7 @@ final class DeviceSession {
             startTestPattern()
             return
         }
-        log.info("Virtual display \(displayID) created: \(self.fbWidth)x\(self.fbHeight)@\(Int(mode.refreshRate)) format \(String(describing: format)) lz4 \(self.compressionEnabled)")
+        log.info("Virtual display \(displayID) created: panel \(self.fbWidth)x\(self.fbHeight)@\(Int(mode.refreshRate)) desktop \(desktop.width)x\(desktop.height) format \(String(describing: format), privacy: .public) lz4 \(self.compressionEnabled)")
 
         startCapture(displayID: displayID)
     }
@@ -277,6 +298,9 @@ final class DeviceSession {
             log.error("Capture stopped: \(String(describing: error), privacy: .public); restarting")
             queue.asyncAfter(deadline: .now() + 0.5) { self.restartCapture() }
         }
+        // A new stream starts at the cap; the throttle re-derives from there.
+        currentMaxFrameRate = effectiveFrameRateCap
+        flushDurationEMA = 0
         Task { [weak self, capture, fbWidth, fbHeight, log] in
             for attempt in 0..<3 {
                 guard let self, !self.closed, self.currentDisplayID != nil else { return }
@@ -526,12 +550,19 @@ final class DeviceSession {
     private func noteFlushDuration(_ duration: TimeInterval) {
         flushDurationEMA = flushDurationEMA == 0 ? duration : flushDurationEMA * 0.8 + duration * 0.2
         guard flushDurationEMA > 0 else { return }
-        let sustainable = min(effectiveFrameRateCap, max(5, Int(0.9 / flushDurationEMA)))
-        if abs(sustainable - currentMaxFrameRate) >= 5 {
-            currentMaxFrameRate = sustainable
-            log.info("Adjusting capture rate to \(sustainable, privacy: .public) fps (flush EMA \(Int(self.flushDurationEMA * 1000), privacy: .public) ms)")
-            capture.setMaxFrameRate(sustainable)
-        }
+        let cap = effectiveFrameRateCap
+        var sustainable = min(cap, max(5, Int(0.9 / flushDurationEMA)))
+        // Snap to the cap when close to it and rate-limit changes: every
+        // adjustment reconfigures the live stream, and a rate hovering near
+        // the cap otherwise flaps several times a second.
+        if sustainable >= cap - 10 { sustainable = cap }
+        guard abs(sustainable - currentMaxFrameRate) >= 5,
+              Date().timeIntervalSince(lastRateAdjustAt) >= 2
+        else { return }
+        currentMaxFrameRate = sustainable
+        lastRateAdjustAt = Date()
+        log.info("Adjusting capture rate to \(sustainable, privacy: .public) fps (flush EMA \(Int(self.flushDurationEMA * 1000), privacy: .public) ms)")
+        capture.setMaxFrameRate(sustainable)
     }
 
     // MARK: Frame pipeline
@@ -539,18 +570,22 @@ final class DeviceSession {
     // Runs on the capture sample queue: compute this frame's damage, then
     // either kick off a flush or fold it into the pending frame.
     private func handle(frame: CaptureController.Frame) {
-        if !loggedFrameGeometry {
-            loggedFrameGeometry = true
-            let bufW = CVPixelBufferGetWidth(frame.pixelBuffer)
-            let bufH = CVPixelBufferGetHeight(frame.pixelBuffer)
-            let stride = CVPixelBufferGetBytesPerRow(frame.pixelBuffer)
-            let fourCC = CVPixelBufferGetPixelFormatType(frame.pixelBuffer)
+        let bufW = CVPixelBufferGetWidth(frame.pixelBuffer)
+        let bufH = CVPixelBufferGetHeight(frame.pixelBuffer)
+        let stride = CVPixelBufferGetBytesPerRow(frame.pixelBuffer)
+        let fourCC = CVPixelBufferGetPixelFormatType(frame.pixelBuffer)
+        let usable = fourCC == kCVPixelFormatType_32BGRA && bufW >= fbWidth && bufH >= fbHeight
+        if lastFrameGeometry.map({ $0 != (bufW, bufH, stride, fourCC) }) ?? true {
+            lastFrameGeometry = (bufW, bufH, stride, fourCC)
             log.info("""
             Capture buffer: \(bufW, privacy: .public)x\(bufH, privacy: .public) \
             stride \(stride, privacy: .public) (tight would be \(bufW * 4, privacy: .public)) \
-            fourCC \(fourCC, privacy: .public) — panel expects \(self.fbWidth, privacy: .public)x\(self.fbHeight, privacy: .public)
+            fourCC \(fourCC, privacy: .public) — panel expects \(self.fbWidth, privacy: .public)x\(self.fbHeight, privacy: .public)\
+            \(usable ? "" : "; UNUSABLE, dropping frames", privacy: .public)
             """)
         }
+        // Never ship a buffer the converter can't read as tightly-cropped BGRA.
+        guard usable else { return }
         let full = DamageRect(x: 0, y: 0, width: fbWidth, height: fbHeight)
         var damage: DamageRect
         if frame.isFirstFrame || frame.dirtyRects.isEmpty || Self.fullFrameOnly

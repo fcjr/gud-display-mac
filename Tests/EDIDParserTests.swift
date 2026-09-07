@@ -69,4 +69,27 @@ final class EDIDParserTests: XCTestCase {
         XCTAssertNil(EDIDParser.parse(Data([0x00])))
         XCTAssertNil(EDIDParser.parse(Data(count: 128)))
     }
+
+    func testKeepsNameWithoutModesOrPhysicalSize() throws {
+        var edid = makeEDID()
+        edid[21] = 0
+        edid[22] = 0
+        edid.replaceSubrange(54..<72, with: repeatElement(UInt8(0), count: 18))
+        let result = try XCTUnwrap(EDIDParser.parse(edid))
+        XCTAssertEqual(result.name, "Pico Panel")
+        XCTAssertTrue(result.modes.isEmpty)
+        XCTAssertNil(result.physicalSizeMillimeters)
+    }
+
+    func testTrimsNullTerminatedName() {
+        var edid = makeEDID()
+        edid.replaceSubrange(77..<90, with: Array("Panel  ".utf8) + [UInt8](repeating: 0, count: 6))
+        XCTAssertEqual(EDIDParser.parse(edid)?.name, "Panel")
+    }
+
+    func testIgnoresBlankName() {
+        var edid = makeEDID()
+        edid.replaceSubrange(77..<90, with: repeatElement(UInt8(0x20), count: 13))
+        XCTAssertNil(EDIDParser.parse(edid)?.name)
+    }
 }

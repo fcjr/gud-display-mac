@@ -36,13 +36,15 @@ enum EDIDParser {
                     isFirstDTD = false
                 }
             } else if bytes[offset + 3] == 0xfc {
-                let nameBytes = bytes[(offset + 5)..<(offset + 18)].prefix { $0 != 0x0a }
-                result.name = String(bytes: nameBytes, encoding: .ascii)?
-                    .trimmingCharacters(in: .whitespaces)
+                let nameBytes = bytes[(offset + 5)..<(offset + 18)].prefix { $0 != 0x0a && $0 != 0 }
+                if let name = String(bytes: nameBytes, encoding: .ascii)?
+                    .trimmingCharacters(in: .whitespaces), !name.isEmpty {
+                    result.name = name
+                }
             }
         }
 
-        return result.modes.isEmpty && result.physicalSizeMillimeters == nil ? nil : result
+        return result.modes.isEmpty && result.physicalSizeMillimeters == nil && result.name == nil ? nil : result
     }
 
     private static func parseDTD(_ b: [UInt8], at o: Int, preferred: Bool) -> GUD.DisplayMode? {

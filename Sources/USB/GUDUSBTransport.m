@@ -29,6 +29,11 @@ static const NSTimeInterval kBulkTimeout = 3.0;
     }
 
     _terminationHandler = [terminationHandler copy];
+    id productName = CFBridgingRelease(IORegistryEntryCreateCFProperty(
+        service, CFSTR("USB Product Name"), kCFAllocatorDefault, 0));
+    if ([productName isKindOfClass:[NSString class]]) {
+        _productName = [productName copy];
+    }
     __weak GUDUSBTransport *weakSelf = self;
     _device = [[IOUSBHostDevice alloc]
         initWithIOService:service

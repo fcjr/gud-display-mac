@@ -21,6 +21,11 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
     var stoppedHandler: ((Error?) -> Void)?
 
     private var stream: SCStream?
+    // Retained so rate changes can be applied to the live stream. Pushing a
+    // fresh SCStreamConfiguration into updateConfiguration replaces EVERY
+    // property with its default (1920x1080, '420v' YCbCr), not just the ones
+    // set on it — the converter would then read a luma plane as BGRA.
+    private var configuration: SCStreamConfiguration?
     private let sampleQueue = DispatchQueue(label: "com.leftshift.gud.capture")
 
     func start(displayID: CGDirectDisplayID, pixelWidth: Int, pixelHeight: Int, maxFrameRate: Int = 60) async throws {
@@ -51,18 +56,20 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
         try await stream.startCapture()
         self.stream = stream
+        self.configuration = configuration
     }
 
     func stop() {
         stream?.stopCapture { _ in }
         stream = nil
+        configuration = nil
     }
 
     // Raise/lower the capture rate without restarting the stream (USB backpressure).
     func setMaxFrameRate(_ maxFrameRate: Int) {
-        let configuration = SCStreamConfiguration()
+        guard let stream, let configuration else { return }
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(maxFrameRate))
-        stream?.updateConfiguration(configuration) { _ in }
+        stream.updateConfiguration(configuration) { _ in }
     }
 
     // MARK: SCStreamOutput

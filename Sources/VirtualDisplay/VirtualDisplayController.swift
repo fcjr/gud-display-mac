@@ -11,23 +11,23 @@ final class VirtualDisplayController {
     }
 
     private(set) var display: CGVirtualDisplay?
-    private var nativeSize: (width: Int, height: Int)?
+    private var desktopSize: (width: Int, height: Int)?
 
     var displayID: CGDirectDisplayID? {
         display?.displayID
     }
 
-    // Must be called on the main queue. `modes[0]` is the panel's native mode:
-    // it determines HiDPI treatment and is selected as the active mode after
-    // creation, so the desktop really runs at the panel's resolution. Any
-    // further modes are larger fallbacks that exist only so mirroring has a
-    // shared resolution to pick (content is scaled down before transfer).
+    // Must be called on the main queue. `desktop` is the mode selected after
+    // creation; it must be one of `modes`. Note macOS picks the largest
+    // non-low-resolution mode on its own and refuses to switch to a mode
+    // narrower than 800 px while a larger one exists.
     func create(name: String,
                 modes: [Mode],
+                desktop: Mode,
                 physicalSizeMillimeters: CGSize?,
                 serialNumber: UInt32) -> CGDirectDisplayID?
     {
-        guard let nativeMode = modes.first else { return nil }
+        guard !modes.isEmpty else { return nil }
         let maxWidth = modes.map(\.width).max()!
         let maxHeight = modes.map(\.height).max()!
 
@@ -47,11 +47,8 @@ final class VirtualDisplayController {
         let display = CGVirtualDisplay(descriptor: descriptor)
 
         let settings = CGVirtualDisplaySettings()
-        // Small panels are published as HiDPI modes: macOS refuses to bring a
-        // display online whose *point* size is tiny, but a HiDPI mode keeps
-        // the backing store at the panel's exact pixel count (336x262 pixels
-        // presented as 168x131 points) — so the panel still gets a real,
-        // unscaled, pixel-for-pixel image.
+        // Not HiDPI: macOS would synthesize a family of larger scaled modes
+        // and pick the biggest, rendering the desktop huge and downsampling.
         settings.hiDPI = 0
         settings.modes = modes.map {
             CGVirtualDisplayMode(width: UInt($0.width), height: UInt($0.height), refreshRate: $0.refreshRate)
@@ -61,7 +58,7 @@ final class VirtualDisplayController {
         }
 
         self.display = display
-        self.nativeSize = (nativeMode.width, nativeMode.height)
+        self.desktopSize = (desktop.width, desktop.height)
         return display.displayID
     }
 
@@ -71,7 +68,7 @@ final class VirtualDisplayController {
     // afterwards leaves the stream compositing the cursor at stale
     // coordinates.
     func finalizeGeometry() {
-        guard let displayID = display?.displayID, let size = nativeSize else { return }
+        guard let displayID = display?.displayID, let size = desktopSize else { return }
         selectMode(width: size.width, height: size.height, on: displayID)
         placeAdjacentToMainDisplay(displayID)
     }
@@ -87,9 +84,8 @@ final class VirtualDisplayController {
         CGCompleteDisplayConfiguration(config, .forSession)
     }
 
-    // macOS may otherwise pick a synthesized scaled mode ("looks like" half
-    // size) over the panel's real one. Modes register asynchronously after
-    // applySettings, so retry until the native mode appears and sticks.
+    // Modes register asynchronously after applySettings, so retry until the
+    // wanted mode appears and sticks.
     //
     // Deliberately uses CGDisplaySetDisplayMode rather than a
     // Begin/CompleteDisplayConfiguration transaction: the transactional form

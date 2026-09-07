@@ -25,6 +25,9 @@ extern NSErrorDomain const GUDUSBTransportErrorDomain;
 /// wMaxPacketSize of the bulk OUT endpoint.
 @property(readonly, nonatomic) NSUInteger bulkMaxPacketSize;
 
+/// Product name cached by IOKit from the USB device descriptor, if available.
+@property(readonly, nonatomic, copy, nullable) NSString *productName;
+
 /// Claims the IOUSBHostDevice for the given service, ensures a configuration
 /// is selected (GUD gadgets report bDeviceClass 0xFF, so macOS's composite
 /// driver never configures them and no interface nodes exist until we do),

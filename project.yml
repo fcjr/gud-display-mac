@@ -39,6 +39,8 @@ targets:
         # any binary that requests it, so Release signs the file as-is.
         Release:
           CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+          # Plain builds need an explicit secure timestamp for notarization.
+          OTHER_CODE_SIGN_FLAGS: "$(inherited) --timestamp"
     info:
       path: Support/Info.plist
       properties:

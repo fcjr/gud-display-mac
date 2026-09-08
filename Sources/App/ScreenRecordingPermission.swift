@@ -25,8 +25,8 @@ enum ScreenRecordingPermission {
         let alert = NSAlert()
         alert.messageText = "Screen Recording permission needed"
         alert.informativeText = """
-        gudmac mirrors your virtual display to the USB display device, which \
-        macOS treats as screen recording. Enable gudmac under \
+        GUD Display mirrors your virtual display to the USB display device, which \
+        macOS treats as screen recording. Enable GUD Display under \
         Privacy & Security › Screen Recording, then relaunch the app.
         """
         alert.addButton(withTitle: "Open System Settings")

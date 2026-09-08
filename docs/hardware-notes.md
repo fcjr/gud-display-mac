@@ -1,6 +1,6 @@
 # Hardware bring-up notes
 
-Findings from running gudmac against real GUD hardware. The reference device
+Findings from running GUD Display against real GUD hardware. The reference device
 was a **USB-to-VGA 16 kHz arcade display adapter** (`1d50:614d`), driving a
 CRT in an arcade cabinet.
 

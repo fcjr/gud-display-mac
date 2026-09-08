@@ -1,4 +1,4 @@
-// Renders the gudmac app icon at every macOS size into the asset catalog.
+// Renders the GUD Display app icon at every macOS size into the asset catalog.
 // Run: swift scripts/make_icon.swift
 //
 // Design: a display whose screen dissolves into pixels at the right edge

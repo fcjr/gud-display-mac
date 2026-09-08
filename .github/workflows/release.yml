@@ -55,6 +55,9 @@ jobs:
           xcodebuild -project GUDDisplay.xcodeproj -scheme GUDDisplay \
             -configuration Release -derivedDataPath build build
 
+      - name: Sign Sparkle's nested components
+        run: scripts/sign-app.sh "build/Build/Products/Release/GUD Display.app"
+
       - name: Notarize and staple
         env:
           APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
@@ -67,7 +70,18 @@ jobs:
             --key "$RUNNER_TEMP/AuthKey.p8" \
             --key-id "${{ secrets.APPLE_API_KEY }}" \
             --issuer "${{ secrets.APPLE_API_ISSUER }}" \
-            --wait
+            --wait --output-format json > "$RUNNER_TEMP/notarize.json"
+          id="$(jq -r .id "$RUNNER_TEMP/notarize.json")"
+          status="$(jq -r .status "$RUNNER_TEMP/notarize.json")"
+          echo "Submission ${id}: ${status}"
+          if [ "$status" != "Accepted" ]; then
+            # submit exits 0 even when Apple rejects; the log has the reasons.
+            xcrun notarytool log "$id" \
+              --key "$RUNNER_TEMP/AuthKey.p8" \
+              --key-id "${{ secrets.APPLE_API_KEY }}" \
+              --issuer "${{ secrets.APPLE_API_ISSUER }}"
+            exit 1
+          fi
           xcrun stapler staple "$app"
 
       - name: Package

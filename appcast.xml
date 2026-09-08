@@ -27,5 +27,16 @@
     <link>https://raw.githubusercontent.com/fcjr/gud-display-mac/main/appcast.xml</link>
     <description>Updates for GUD Display for macOS</description>
     <language>en</language>
+    <item>
+      <title>0.1.3</title>
+      <sparkle:version>0.1.3</sparkle:version>
+      <sparkle:shortVersionString>0.1.3</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Tue, 08 Sep 2026 18:09:24 +0000</pubDate>
+      <enclosure
+        url="https://github.com/fcjr/gud-display-mac/releases/download/v0.1.3/GUD-Display-0.1.3.zip"
+        sparkle:edSignature="FWDojDcXfloyZxgFeD5kVsAVE7jk/wtksmMxdOfm82nxV6RIb/jVvySBSmurAngFUHqaUc74BI8okTgqhMhSBQ==" length="2349782"
+        type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>

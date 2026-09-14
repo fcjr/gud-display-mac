@@ -4,6 +4,18 @@ import Foundation
 // In-memory GUD device for protocol tests. Profiles model the real device
 // ecosystem: the Linux kernel gadget, samcday/gud-gadget, and gud-pico.
 final class MockGUDTransport: GUDTransport {
+    enum Event: Equatable {
+        case controlIn(UInt8)
+        case controlOut(UInt8)
+        case beginBulk
+        case waitBulk
+    }
+
+    enum BulkError: Error {
+        case alreadyPending
+        case nonePending
+    }
+
     struct Profile {
         var descriptor: Data
         var formats: Data
@@ -20,12 +32,18 @@ final class MockGUDTransport: GUDTransport {
     private(set) var controlLog: [(request: UInt8, wValue: UInt16, out: Data?)] = []
     private(set) var bulkPayloads: [Data] = []
     private(set) var statusReadCount = 0
+    private(set) var events: [Event] = []
+    private var bulkPending = false
+    var controlOutError: Error?
+    var beginBulkError: Error?
+    var waitBulkError: Error?
 
     init(profile: Profile) {
         self.profile = profile
     }
 
     func controlIn(request: UInt8, wValue: UInt16, length: UInt16) throws -> Data {
+        events.append(.controlIn(request))
         controlLog.append((request, wValue, nil))
         switch request {
         case 0x00:
@@ -44,11 +62,25 @@ final class MockGUDTransport: GUDTransport {
     }
 
     func controlOut(request: UInt8, wValue: UInt16, data: Data?) throws {
+        guard !bulkPending else { throw BulkError.alreadyPending }
+        events.append(.controlOut(request))
         controlLog.append((request, wValue, data))
+        if let controlOutError { throw controlOutError }
     }
 
-    func bulkWrite(_ data: NSMutableData) throws {
-        bulkPayloads.append(Data(referencing: data))
+    func beginBulkWrite(_ data: NSMutableData) throws {
+        guard !bulkPending else { throw BulkError.alreadyPending }
+        events.append(.beginBulk)
+        if let beginBulkError { throw beginBulkError }
+        bulkPending = true
+        bulkPayloads.append(Data(bytes: data.bytes, count: data.length))
+    }
+
+    func waitBulkWrite() throws {
+        guard bulkPending else { throw BulkError.nonePending }
+        events.append(.waitBulk)
+        bulkPending = false
+        if let waitBulkError { throw waitBulkError }
     }
 
     // MARK: Profile builders

@@ -158,7 +158,11 @@ final class GUDDeviceClient {
             if descriptor?.flags.contains(.fullUpdate) != true || prevFlushFailed {
                 try controlOut(.setBuffer, data: header.encoded())
             }
-            try transport.bulkWrite(payload)
+            // Submit through IOUSBHost's async API, but preserve GUD's wire
+            // order: finish this payload before the next SET_BUFFER. Holding
+            // ioLock also prevents state changes from splitting the update.
+            try transport.beginBulkWrite(payload)
+            try transport.waitBulkWrite()
         } catch let error as GUDClientError {
             prevFlushFailed = true
             throw error

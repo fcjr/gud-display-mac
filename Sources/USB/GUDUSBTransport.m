@@ -12,11 +12,26 @@ static const uint8_t kGUDRequestTypeOut = 0x41; // OUT | vendor | interface
 static const NSTimeInterval kControlTimeout = 5.0;
 static const NSTimeInterval kBulkTimeout = 3.0;
 
+// The completion owns this object until USB has finished with the payload.
+// A group lets both the flush worker and teardown wait without consuming
+// each other's notification. The callback never needs the transport lock.
+@interface GUDBulkWrite : NSObject
+@property(nonatomic, strong) NSMutableData *payload;
+@property(nonatomic, strong) dispatch_group_t done;
+@property(nonatomic) IOReturn status;
+@property(nonatomic) NSUInteger bytes;
+@property(nonatomic) NSUInteger expected;
+@end
+
+@implementation GUDBulkWrite
+@end
+
 @implementation GUDUSBTransport {
     IOUSBHostDevice *_device;
     IOUSBHostInterface *_interface;
     IOUSBHostPipe *_bulkOut;
     void (^_terminationHandler)(void);
+    GUDBulkWrite *_bulkWrite;
 }
 
 - (nullable instancetype)initWithService:(io_service_t)service
@@ -208,21 +223,78 @@ static const NSTimeInterval kBulkTimeout = 3.0;
                                    error:error];
 }
 
-- (BOOL)bulkWrite:(NSMutableData *)data error:(NSError **)error
+- (BOOL)beginBulkWrite:(NSMutableData *)data error:(NSError **)error
 {
-    NSUInteger bytesTransferred = 0;
-    BOOL ok = [_bulkOut sendIORequestWithData:data
-                             bytesTransferred:&bytesTransferred
-                            completionTimeout:kBulkTimeout
-                                        error:error];
-    if (!ok) {
+    @synchronized(self) {
+        if (!_bulkOut || _bulkWrite) {
+            if (error) {
+                *error = [NSError errorWithDomain:GUDUSBTransportErrorDomain
+                                             code:_bulkOut ? kIOReturnBusy : kIOReturnNoDevice
+                                         userInfo:@{NSLocalizedDescriptionKey : _bulkOut
+                                             ? @"A bulk transfer is already pending"
+                                             : @"The USB interface is closed"}];
+            }
+            return NO;
+        }
+        GUDBulkWrite *write = [GUDBulkWrite new];
+        write.payload = data;
+        write.expected = data.length;
+        write.done = dispatch_group_create();
+        dispatch_group_enter(write.done);
+        BOOL ok = [_bulkOut enqueueIORequestWithData:data
+                                  completionTimeout:kBulkTimeout
+                                              error:error
+                                  completionHandler:^(IOReturn status, NSUInteger bytesTransferred) {
+                                      write.status = status;
+                                      write.bytes = bytesTransferred;
+                                      dispatch_group_leave(write.done);
+                                  }];
+        if (!ok) {
+            dispatch_group_leave(write.done);
+            return NO;
+        }
+        _bulkWrite = write;
+        return YES;
+    }
+}
+
+- (BOOL)waitBulkWriteWithError:(NSError **)error
+{
+    GUDBulkWrite *write;
+    @synchronized(self) {
+        write = _bulkWrite;
+    }
+    if (!write) {
+        return YES;
+    }
+    // IOUSBHost completes on its own queue, including errors, cancellation,
+    // and the three-second USB timeout. Never wait on that callback queue.
+    dispatch_group_wait(write.done, DISPATCH_TIME_FOREVER);
+    @synchronized(self) {
+        if (_bulkWrite == write) {
+            _bulkWrite = nil;
+        }
+    }
+    if (write.status != kIOReturnSuccess) {
+        if (error) {
+            *error = [NSError errorWithDomain:GUDUSBTransportErrorDomain
+                                         code:write.status
+                                     userInfo:@{
+                                         NSLocalizedDescriptionKey : [NSString
+                                             stringWithFormat:@"Bulk transfer failed: 0x%08x", write.status]
+                                     }];
+        }
         return NO;
     }
-    if (bytesTransferred != data.length) {
+    if (write.bytes != write.expected) {
         if (error) {
             *error = [NSError errorWithDomain:GUDUSBTransportErrorDomain
                                          code:2
-                                     userInfo:@{NSLocalizedDescriptionKey : @"Short bulk transfer"}];
+                                     userInfo:@{
+                                         NSLocalizedDescriptionKey : [NSString
+                                             stringWithFormat:@"Short bulk transfer: %lu of %lu bytes",
+                                                              (unsigned long)write.bytes, (unsigned long)write.expected]
+                                     }];
         }
         return NO;
     }
@@ -236,11 +308,19 @@ static const NSTimeInterval kBulkTimeout = 3.0;
 
 - (void)invalidate
 {
-    _bulkOut = nil;
-    [_interface destroy];
-    _interface = nil;
-    [_device destroy];
-    _device = nil;
+    @synchronized(self) {
+        if (_bulkWrite) {
+            // Drain the callback before destroying its dispatch source. Keep
+            // the result available for the flush worker's matching wait.
+            [_bulkOut abortWithOption:IOUSBHostAbortOptionSynchronous error:nil];
+            dispatch_group_wait(_bulkWrite.done, DISPATCH_TIME_FOREVER);
+        }
+        _bulkOut = nil;
+        [_interface destroy];
+        _interface = nil;
+        [_device destroy];
+        _device = nil;
+    }
 }
 
 @end

@@ -54,9 +54,16 @@ extern NSErrorDomain const GUDUSBTransportErrorDomain;
                          data:(nullable NSData *)data
                         error:(NSError **)error;
 
-/// Synchronous bulk OUT transfer of the entire buffer. The buffer is used
-/// directly for IO (no copy); callers should reuse one buffer across flushes.
-- (BOOL)bulkWrite:(NSMutableData *)data error:(NSError **)error;
+/// Starts an asynchronous bulk OUT transfer. Pair each successful call with
+/// -waitBulkWriteWithError: before sending the next SET_BUFFER or bulk write.
+/// The buffer is retained without copying and must not be modified until
+/// the wait returns. At most one transfer may be pending at a time.
+- (BOOL)beginBulkWrite:(NSMutableData *)data error:(NSError **)error;
+
+/// Blocks until the transfer started by -beginBulkWrite: completes, reporting
+/// a failed or short transfer as an error. Call from a worker thread, never
+/// from the IOUSBHost completion queue.
+- (BOOL)waitBulkWriteWithError:(NSError **)error;
 
 /// Resets and re-enumerates the device (recovery for wedged firmware).
 /// The current services terminate — the termination handler will fire — and

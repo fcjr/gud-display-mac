@@ -5,7 +5,9 @@ import Foundation
 protocol GUDTransport: AnyObject {
     func controlIn(request: UInt8, wValue: UInt16, length: UInt16) throws -> Data
     func controlOut(request: UInt8, wValue: UInt16, data: Data?) throws
-    func bulkWrite(_ data: NSMutableData) throws
+    // Pair every successful begin with a wait before the next SET_BUFFER.
+    func beginBulkWrite(_ data: NSMutableData) throws
+    func waitBulkWrite() throws
 }
 
 extension GUDUSBTransport: GUDTransport {

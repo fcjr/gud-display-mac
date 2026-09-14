@@ -696,13 +696,7 @@ final class DeviceSession {
             stateLock.unlock()
 
             let started = Date()
-            var bytes = 0
-            var pixelBytes = 0
-            for transfer in slots[slot].transfers {
-                bytes += transfer.payload.length
-                pixelBytes += transfer.uncompressedLength
-                guard send(transfer) else { break }
-            }
+            let (bytes, pixelBytes) = flushFrame(slots[slot].transfers)
             noteFlushDuration(Date().timeIntervalSince(started))
             recordFlush(bytes: bytes, pixelBytes: pixelBytes)
 
@@ -713,25 +707,44 @@ final class DeviceSession {
         }
     }
 
-    // Same policy as the Linux gud driver (gud_flush_damage): a failed
-    // transfer abandons the rest of this flush, is logged rate-limited, and
-    // the next damage simply tries again. No retry, no ping, no reset, no
-    // rate change: a device that is gone is torn down by the termination
-    // handler, and one that is merely slow is paced by USB flow control.
-    private func send(_ transfer: PendingTransfer) -> Bool {
-        let band = transfer.rect
-        do {
-            try client.flush(x: band.x, y: band.y, width: band.width, height: band.height,
-                             uncompressedLength: transfer.uncompressedLength,
-                             payload: transfer.payload, compressed: transfer.compressed)
-            return true
-        } catch {
-            if Date().timeIntervalSince(lastFlushErrorLogAt) >= 5 {
-                lastFlushErrorLogAt = Date()
-                log.error("Failed to flush framebuffer: \(String(describing: error), privacy: .public)")
+    // Finish each band's payload before sending the next SET_BUFFER, as the
+    // Linux GUD host does. GUD has no capability for queuing headers ahead of
+    // unfinished payloads. Capture still packs the next frame concurrently.
+    // Count only completed transfers.
+    //
+    // Error policy matches the Linux gud driver (gud_flush_damage): a failed
+    // transfer abandons the rest of the frame, is logged rate-limited, and the
+    // next damage tries again. No retry, no ping, no reset, no rate change.
+    private func flushFrame(_ transfers: [PendingTransfer]) -> (bytes: Int, pixelBytes: Int) {
+        var bytes = 0
+        var pixelBytes = 0
+        for transfer in transfers {
+            do {
+                try client.flush(x: transfer.rect.x, y: transfer.rect.y,
+                                 width: transfer.rect.width, height: transfer.rect.height,
+                                 uncompressedLength: transfer.uncompressedLength,
+                                 payload: transfer.payload, compressed: transfer.compressed)
+                bytes += transfer.payload.length
+                pixelBytes += transfer.uncompressedLength
+            } catch {
+                logFlushError(error, transfer)
+                break
             }
-            return false
         }
+        return (bytes, pixelBytes)
+    }
+
+    private func logFlushError(_ error: Error, _ t: PendingTransfer) {
+        guard Date().timeIntervalSince(lastFlushErrorLogAt) >= 5 else { return }
+        lastFlushErrorLogAt = Date()
+        log.error("""
+        Failed to flush framebuffer: \(String(describing: error), privacy: .public) \
+        (rect \(t.rect.x, privacy: .public),\(t.rect.y, privacy: .public) \
+        \(t.rect.width, privacy: .public)x\(t.rect.height, privacy: .public), \
+        \(t.payload.length, privacy: .public) bytes on the wire for \
+        \(t.uncompressedLength, privacy: .public), \
+        \(t.compressed ? "lz4" : "raw", privacy: .public))
+        """)
     }
 
     // MARK: Stats

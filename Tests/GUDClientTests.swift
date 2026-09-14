@@ -103,6 +103,99 @@ final class GUDClientTests: XCTestCase {
         XCTAssertEqual(Array(encoded.suffix(10)), [12, 0, 40, 0, 0, 0, 0, 0, 0, 0])
     }
 
+    func testAsyncFlushCompletesBeforeNextSetBuffer() throws {
+        let transport = MockGUDTransport.kernelGadget()
+        let client = GUDDeviceClient(transport: transport)
+        try client.initialize()
+        let start = transport.events.count
+        let payload = NSMutableData(data: Data([1, 2, 3, 4]))
+        for y in 0..<2 {
+            try client.flush(x: 0, y: y, width: 2, height: 1,
+                             uncompressedLength: 4, payload: payload, compressed: false)
+        }
+        XCTAssertEqual(Array(transport.events.dropFirst(start)), [
+            .controlOut(0x60), .controlIn(0x00), .beginBulk, .waitBulk,
+            .controlOut(0x60), .controlIn(0x00), .beginBulk, .waitBulk,
+        ])
+    }
+
+    func testRejectedSetBufferDoesNotSubmitBulk() throws {
+        let transport = MockGUDTransport.kernelGadget()
+        let client = GUDDeviceClient(transport: transport)
+        try client.initialize()
+        transport.profile.status = 0x04
+        let start = transport.events.count
+        XCTAssertThrowsError(try client.flush(x: 0, y: 0, width: 2, height: 1,
+                                              uncompressedLength: 4,
+                                              payload: NSMutableData(length: 4)!, compressed: false))
+        XCTAssertEqual(Array(transport.events.dropFirst(start)), [.controlOut(0x60), .controlIn(0x00)])
+        XCTAssertTrue(transport.bulkPayloads.isEmpty)
+    }
+
+    func testEnqueueFailureDoesNotWaitAndFullUpdateResynchronizes() throws {
+        try assertFullUpdateRecovery(failEnqueue: true)
+    }
+
+    func testCompletionFailureMakesFullUpdateResynchronize() throws {
+        try assertFullUpdateRecovery(failEnqueue: false)
+    }
+
+    private func assertFullUpdateRecovery(failEnqueue: Bool) throws {
+        let transport = MockGUDTransport.pico()
+        let client = GUDDeviceClient(transport: transport)
+        try client.initialize()
+        let failure = NSError(domain: "test.usb", code: 42)
+        if failEnqueue {
+            transport.beginBulkError = failure
+        } else {
+            transport.waitBulkError = failure
+        }
+        let payload = NSMutableData(length: 320 * 240 * 2)!
+        let start = transport.events.count
+        XCTAssertThrowsError(try client.flush(x: 0, y: 0, width: 320, height: 240,
+                                              uncompressedLength: payload.length,
+                                              payload: payload, compressed: false)) { error in
+            guard case GUDClientError.transport(let underlying) = error else {
+                return XCTFail("Expected transport error, got \(error)")
+            }
+            XCTAssertEqual((underlying as NSError).code, failure.code)
+        }
+        XCTAssertEqual(Array(transport.events.dropFirst(start)),
+                       failEnqueue ? [.beginBulk] : [.beginBulk, .waitBulk])
+
+        transport.beginBulkError = nil
+        transport.waitBulkError = nil
+        // A failed recovery header must not clear prevFlushFailed.
+        transport.controlOutError = failure
+        XCTAssertThrowsError(try client.flush(x: 0, y: 0, width: 320, height: 240,
+                                              uncompressedLength: payload.length,
+                                              payload: payload, compressed: false))
+        transport.controlOutError = nil
+        let recovery = transport.events.count
+        try client.flush(x: 0, y: 0, width: 320, height: 240,
+                         uncompressedLength: payload.length, payload: payload, compressed: false)
+        try client.flush(x: 0, y: 0, width: 320, height: 240,
+                         uncompressedLength: payload.length, payload: payload, compressed: false)
+        XCTAssertEqual(Array(transport.events.dropFirst(recovery)), [
+            .controlOut(0x60), .beginBulk, .waitBulk,
+            .beginBulk, .waitBulk,
+        ])
+    }
+
+    func testCompressedAsyncFlushKeepsWireAndPixelLengthsDistinct() throws {
+        let transport = MockGUDTransport.sloppyGadget()
+        let client = GUDDeviceClient(transport: transport)
+        try client.initialize()
+        let payload = NSMutableData(data: Data([1, 2, 3]))
+        try client.flush(x: 4, y: 6, width: 8, height: 2,
+                         uncompressedLength: 32, payload: payload, compressed: true)
+        let header = try XCTUnwrap(transport.controlLog.last(where: { $0.request == 0x60 })?.out)
+        XCTAssertEqual(header.leUInt32(at: 16), 32)
+        XCTAssertEqual(header[20], GUD.compressionLZ4)
+        XCTAssertEqual(header.leUInt32(at: 21), 3)
+        XCTAssertEqual(transport.bulkPayloads, [Data([1, 2, 3])])
+    }
+
     func testRejectsWrongMagicAndVersion() {
         let wrongMagic = MockGUDTransport(profile: .init(
             descriptor: MockGUDTransport.descriptor(flags: 0, compression: 0, magic: 0xdead_beef),

@@ -20,8 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
-        if !ScreenRecordingPermission.granted {
-            ScreenRecordingPermission.request()
+        if !ScreenRecordingPermission.granted && !ScreenRecordingPermission.request() {
             ScreenRecordingPermission.presentOnboardingAlert()
         }
 
@@ -81,6 +80,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let size = session.currentPixelSize
                 menu.addItem(disabledItem("\(session.displayName) — \(size.width)×\(size.height)"))
                 menu.addItem(disabledItem("    " + statsLine(for: key, session: session)))
+
+                let previewItem = NSMenuItem(title: "    Open Display Window",
+                                              action: #selector(openDisplayWindow(_:)), keyEquivalent: "")
+                previewItem.target = self
+                previewItem.representedObject = session
+                menu.addItem(previewItem)
 
                 let resolutionMenu = NSMenu()
                 for choice in session.modeChoices {
@@ -169,6 +174,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func changeBrightness(_ sender: BrightnessSlider) {
         sender.session?.setBrightness(Int(sender.doubleValue.rounded()))
+    }
+
+    @objc private func openDisplayWindow(_ sender: NSMenuItem) {
+        (sender.representedObject as? DeviceSession)?.showDisplayWindow()
     }
 
     @objc private func selectResolution(_ sender: NSMenuItem) {

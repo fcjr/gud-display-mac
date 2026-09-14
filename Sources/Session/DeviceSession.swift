@@ -15,6 +15,8 @@ final class DeviceSession {
     private let client: GUDDeviceClient
     private let virtualDisplay = VirtualDisplayController()
     private let capture = CaptureController()
+    // Window ownership and all access to it stay on the main queue.
+    private var displayWindow: DisplayWindowController?
 
     private var format: GUD.PixelFormat = .xrgb8888
     private var mode: GUD.DisplayMode?
@@ -350,6 +352,24 @@ final class DeviceSession {
 
     private var captureTargetID: CGDirectDisplayID?
 
+    func showDisplayWindow() {
+        if displayWindow == nil {
+            displayWindow = DisplayWindowController(displayName: displayName, source: capture.previewSource)
+        }
+        displayWindow?.showWindow(nil)
+        updateDisplayWindow()
+    }
+
+    private func updateDisplayWindow() {
+        queue.async { [weak self] in
+            guard let self, !closed else { return }
+            let target = resolveCaptureTarget()
+            DispatchQueue.main.async { [weak self] in
+                self?.displayWindow?.setDisplayID(target)
+            }
+        }
+    }
+
     // When our display is a mirror destination it is no longer independently
     // capturable — capture the mirror source instead (its content is identical).
     private func resolveCaptureTarget() -> CGDirectDisplayID? {
@@ -361,6 +381,9 @@ final class DeviceSession {
     private func startCapture(displayID: CGDirectDisplayID) {
         let target = resolveCaptureTarget() ?? displayID
         captureTargetID = target
+        DispatchQueue.main.async { [weak self] in
+            self?.displayWindow?.setDisplayID(target)
+        }
         if target != displayID {
             log.info("Display \(displayID) is mirrored; capturing source display \(target)")
         }
@@ -371,6 +394,10 @@ final class DeviceSession {
         // changes) must never strand the device on a frozen frame — restart.
         capture.stoppedHandler = { [weak self] error in
             guard let self else { return }
+            if let error, CaptureError.requiresUserAction(error) {
+                log.error("Capture requires user action: \(String(describing: error), privacy: .public)")
+                return
+            }
             log.error("Capture stopped: \(String(describing: error), privacy: .public); restarting")
             queue.asyncAfter(deadline: .now() + 0.5) { self.restartCapture() }
         }
@@ -386,6 +413,9 @@ final class DeviceSession {
                     return
                 } catch {
                     log.error("Capture start failed (attempt \(attempt + 1)): \(String(describing: error), privacy: .public)")
+                    // A denied permission cannot be fixed by retrying or
+                    // recreating the display; repeated requests just nag.
+                    if CaptureError.requiresUserAction(error) { return }
                     try? await Task.sleep(nanoseconds: 2_000_000_000)
                 }
             }
@@ -422,6 +452,7 @@ final class DeviceSession {
     private func reconfigureConnector() {
         capture.stop()
         DispatchQueue.main.sync {
+            displayWindow?.setDisplayID(nil)
             virtualDisplay.destroy()
         }
         currentDisplayID = nil
@@ -450,6 +481,7 @@ final class DeviceSession {
     }
 
     private func screenParametersChanged() {
+        updateDisplayWindow()
         guard let displayID = currentDisplayID else { return }
 
         // Mirroring toggles change the capture target without our screen
@@ -784,6 +816,7 @@ final class DeviceSession {
         queue.async { [self] in
             guard !closed else { return }
             capture.stop()
+            DispatchQueue.main.async { [weak self] in self?.displayWindow?.setDisplayID(nil) }
             try? client.setDisplayEnabled(false)
         }
     }
@@ -815,6 +848,8 @@ final class DeviceSession {
             }
             transport.invalidate()
             DispatchQueue.main.async { [self] in
+                displayWindow?.close()
+                displayWindow = nil
                 if let observer = screenObserver {
                     NotificationCenter.default.removeObserver(observer)
                     screenObserver = nil

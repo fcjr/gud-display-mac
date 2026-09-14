@@ -16,7 +16,7 @@ build: gen
 
 # Run the protocol/pipeline test suite
 test: gen
-    xcodebuild -project {{project}} -scheme {{scheme}} -derivedDataPath build test
+    xcodebuild -project {{project}} -scheme {{scheme}} -derivedDataPath build/tests test
 
 # Build the Release app (CI signs and notarizes this)
 dist: gen

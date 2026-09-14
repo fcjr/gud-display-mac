@@ -4,6 +4,13 @@ import CoreMedia
 
 enum CaptureError: Error {
     case displayNotFound
+
+    static func requiresUserAction(_ error: Error) -> Bool {
+        let error = error as NSError
+        guard error.domain == SCStreamErrorDomain else { return false }
+        return [SCStreamError.Code.userDeclined, .userStopped, .missingEntitlements]
+            .contains { $0.rawValue == error.code }
+    }
 }
 
 // Captures one virtual display via ScreenCaptureKit and surfaces frames with
@@ -19,6 +26,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
 
     var frameHandler: ((Frame) -> Void)?
     var stoppedHandler: ((Error?) -> Void)?
+    let previewSource = DisplayPreviewSource()
 
     private var stream: SCStream?
     // Retained so rate changes can be applied to the live stream. Pushing a
@@ -33,13 +41,17 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         // A freshly created virtual display takes a moment to appear in the
         // shareable-content snapshot; poll briefly.
         var scDisplay: SCDisplay?
+        var shareableContent: SCShareableContent?
         for _ in 0..<20 {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
             scDisplay = content.displays.first { $0.displayID == displayID }
-            if scDisplay != nil { break }
+            if scDisplay != nil {
+                shareableContent = content
+                break
+            }
             try await Task.sleep(nanoseconds: 250_000_000)
         }
-        guard let scDisplay else {
+        guard let scDisplay, let shareableContent else {
             throw CaptureError.displayNotFound
         }
 
@@ -54,12 +66,14 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         let filter = SCContentFilter(display: scDisplay, excludingWindows: [])
         let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
+        previewSource.prepare(content: shareableContent, display: scDisplay, stream: stream)
         try await stream.startCapture()
         self.stream = stream
         self.configuration = configuration
     }
 
     func stop() {
+        previewSource.clear()
         stream?.stopCapture { _ in }
         stream = nil
         configuration = nil
@@ -87,6 +101,7 @@ final class CaptureController: NSObject, SCStreamOutput, SCStreamDelegate {
         guard status == .complete || status == .started else { return }
 
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        previewSource.update(pixelBuffer, from: stream)
         let dirtyRects = (info[.dirtyRects] as? [NSValue])?.map(\.rectValue) ?? []
         frameHandler?(Frame(pixelBuffer: pixelBuffer, dirtyRects: dirtyRects, isFirstFrame: status == .started))
     }

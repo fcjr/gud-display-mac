@@ -222,7 +222,7 @@ final class DeviceSession {
                 modes: deviceModes + companion + scaledModes,
                 desktop: desktop,
                 physicalSizeMillimeters: edidInfo?.physicalSizeMillimeters,
-                serialNumber: 1
+                serialNumber: displaySerialNumber
             )
         }
         guard let displayID else {
@@ -242,6 +242,21 @@ final class DeviceSession {
         log.info("Virtual display \(displayID) created: panel \(self.fbWidth)x\(self.fbHeight)@\(Int(mode.refreshRate)) desktop \(desktop.width)x\(desktop.height) format \(String(describing: format), privacy: .public) lz4 \(self.compressionEnabled)")
 
         startCapture(displayID: displayID)
+    }
+
+    // CGVirtualDisplay identifies a display by vendor, product and serial, and
+    // macOS keys arrangement and per-display settings on that. Derive it from
+    // the device so two GUD displays don't collide and one keeps its settings
+    // across replugs: a hash of the USB serial string, else the port.
+    private var displaySerialNumber: UInt32 {
+        if let serial = transport.serialNumber, !serial.isEmpty {
+            var hash: UInt32 = 2_166_136_261 // FNV-1a
+            for byte in serial.utf8 {
+                hash = (hash ^ UInt32(byte)) &* 16_777_619
+            }
+            return hash == 0 ? 1 : hash
+        }
+        return transport.locationID == 0 ? 1 : transport.locationID
     }
 
     // Offered alongside the panel's native mode so macOS has usable common

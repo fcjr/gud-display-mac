@@ -34,6 +34,16 @@ static const NSTimeInterval kBulkTimeout = 3.0;
     if ([productName isKindOfClass:[NSString class]]) {
         _productName = [productName copy];
     }
+    id serialNumber = CFBridgingRelease(IORegistryEntryCreateCFProperty(
+        service, CFSTR("USB Serial Number"), kCFAllocatorDefault, 0));
+    if ([serialNumber isKindOfClass:[NSString class]]) {
+        _serialNumber = [serialNumber copy];
+    }
+    id locationID = CFBridgingRelease(IORegistryEntryCreateCFProperty(
+        service, CFSTR("locationID"), kCFAllocatorDefault, 0));
+    if ([locationID isKindOfClass:[NSNumber class]]) {
+        _locationID = [locationID unsignedIntValue];
+    }
     __weak GUDUSBTransport *weakSelf = self;
     _device = [[IOUSBHostDevice alloc]
         initWithIOService:service

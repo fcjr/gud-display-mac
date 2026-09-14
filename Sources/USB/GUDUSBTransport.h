@@ -28,6 +28,12 @@ extern NSErrorDomain const GUDUSBTransportErrorDomain;
 /// Product name cached by IOKit from the USB device descriptor, if available.
 @property(readonly, nonatomic, copy, nullable) NSString *productName;
 
+/// Serial number string from the USB device descriptor, if the device has one.
+@property(readonly, nonatomic, copy, nullable) NSString *serialNumber;
+
+/// IOKit location ID: identifies the port the device is plugged into.
+@property(readonly, nonatomic) uint32_t locationID;
+
 /// Claims the IOUSBHostDevice for the given service, ensures a configuration
 /// is selected (GUD gadgets report bDeviceClass 0xFF, so macOS's composite
 /// driver never configures them and no interface nodes exist until we do),

@@ -20,6 +20,11 @@ final class DeviceSession {
     private var mode: GUD.DisplayMode?
     private var availableModes: [GUD.DisplayMode] = []
     private var connectorIndex = 0
+    // The connector's properties as last checked. The protocol wants the
+    // complete set with every STATE_CHECK, so a change is an edit to this
+    // copy followed by check and commit.
+    private var connectorProperties: [GUD.Property] = []
+    private var requestedBrightness: Int?
     private var maxTransferBytes = 1 << 20
     private var compressionEnabled = false
     private var fbWidth = 0
@@ -156,6 +161,8 @@ final class DeviceSession {
         }
         self.format = format
 
+        connectorProperties = client.connectorProperties[safe: connectorIndex] ?? []
+
         // Enable sequence per the Linux host driver:
         // STATE_CHECK -> CONTROLLER_ENABLE -> STATE_COMMIT -> DISPLAY_ENABLE.
         // Best-effort: minimal fixed-mode devices (observed on real hardware)
@@ -277,9 +284,53 @@ final class DeviceSession {
             mode: mode,
             format: format,
             connector: UInt8(connectorIndex),
-            properties: client.connectorProperties[safe: connectorIndex] ?? []
+            properties: connectorProperties
         )
         try client.checkState(state)
+    }
+
+    // MARK: Backlight
+
+    // Current backlight level, or nil when the connector has no
+    // BACKLIGHT_BRIGHTNESS property.
+    var brightness: Int? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return connectorProperties.first { $0.prop == GUD.Property.backlightBrightness }.map { Int($0.val) }
+    }
+
+    // Menu-driven. A slider fires faster than a control round trip on a
+    // full-speed link, so only the latest value is sent to the device.
+    func setBrightness(_ percent: Int) {
+        let percent = min(100, max(0, percent))
+        stateLock.lock()
+        let inFlight = requestedBrightness != nil
+        requestedBrightness = percent
+        stateLock.unlock()
+        guard !inFlight else { return }
+        queue.async { [self] in
+            stateLock.lock()
+            let target = requestedBrightness
+            requestedBrightness = nil
+            let index = connectorProperties.firstIndex { $0.prop == GUD.Property.backlightBrightness }
+            guard let target, let index else {
+                stateLock.unlock()
+                return
+            }
+            let previous = connectorProperties[index]
+            connectorProperties[index] = GUD.Property(prop: previous.prop, val: UInt64(target))
+            stateLock.unlock()
+            guard !closed, let mode else { return }
+            do {
+                try applyState(mode)
+                try client.commit()
+            } catch {
+                stateLock.lock()
+                connectorProperties[index] = previous
+                stateLock.unlock()
+                log.error("Device declined brightness \(target, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
+        }
     }
 
     private var captureTargetID: CGDirectDisplayID?

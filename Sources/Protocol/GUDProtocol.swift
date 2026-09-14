@@ -189,11 +189,18 @@ enum GUD {
         }
     }
 
-    struct Property {
+    struct Property: Equatable {
         static let byteSize = 10
+        // GUD_PROPERTY_BACKLIGHT_BRIGHTNESS, a connector property, 0 to 100.
+        static let backlightBrightness: UInt16 = 12
 
         let prop: UInt16
         let val: UInt64
+
+        init(prop: UInt16, val: UInt64) {
+            self.prop = prop
+            self.val = val
+        }
 
         init?(parsing data: Data, at offset: Int) {
             guard data.count >= offset + Self.byteSize else { return nil }

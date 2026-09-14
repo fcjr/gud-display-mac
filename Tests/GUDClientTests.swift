@@ -89,6 +89,20 @@ final class GUDClientTests: XCTestCase {
         XCTAssertEqual(header[header.startIndex + 20], 0) // compression
     }
 
+    func testStateRequestCarriesConnectorProperties() throws {
+        let transport = MockGUDTransport.kernelGadget()
+        let client = GUDDeviceClient(transport: transport)
+        try client.initialize()
+
+        var properties = client.connectorProperties[0]
+        properties[0] = GUD.Property(prop: GUD.Property.backlightBrightness, val: 40)
+        let mode = try client.modes(forConnector: 0)[0]
+        let encoded = GUD.StateRequest(mode: mode, format: .rgb565, connector: 0, properties: properties).encoded()
+        // mode (24) + format + connector, then one packed 10-byte property.
+        XCTAssertEqual(encoded.count, 24 + 2 + 10)
+        XCTAssertEqual(Array(encoded.suffix(10)), [12, 0, 40, 0, 0, 0, 0, 0, 0, 0])
+    }
+
     func testRejectsWrongMagicAndVersion() {
         let wrongMagic = MockGUDTransport(profile: .init(
             descriptor: MockGUDTransport.descriptor(flags: 0, compression: 0, magic: 0xdead_beef),

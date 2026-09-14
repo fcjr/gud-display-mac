@@ -94,6 +94,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let resolutionItem = NSMenuItem(title: "    Resolution", action: nil, keyEquivalent: "")
                 resolutionItem.submenu = resolutionMenu
                 menu.addItem(resolutionItem)
+                if let brightness = session.brightness {
+                    menu.addItem(disabledItem("    Brightness"))
+                    menu.addItem(brightnessItem(for: session, value: brightness))
+                }
                 menu.addItem(.separator())
             }
         }
@@ -127,6 +131,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return statsLines[key] ?? "—"
     }
 
+    private final class BrightnessSlider: NSSlider {
+        weak var session: DeviceSession?
+    }
+
+    private func brightnessItem(for session: DeviceSession, value: Int) -> NSMenuItem {
+        let slider = BrightnessSlider(value: Double(value), minValue: 0, maxValue: 100,
+                                      target: self, action: #selector(changeBrightness(_:)))
+        slider.session = session
+        slider.isContinuous = true
+        slider.frame = NSRect(x: 22, y: 4, width: 180, height: 20)
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 224, height: 28))
+        view.addSubview(slider)
+        let item = NSMenuItem()
+        item.view = view
+        return item
+    }
+
     private func disabledItem(_ title: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
@@ -144,6 +165,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.width = width
             self.height = height
         }
+    }
+
+    @objc private func changeBrightness(_ sender: BrightnessSlider) {
+        sender.session?.setBrightness(Int(sender.doubleValue.rounded()))
     }
 
     @objc private func selectResolution(_ sender: NSMenuItem) {

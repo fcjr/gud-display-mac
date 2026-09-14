@@ -29,25 +29,21 @@ final class DeviceSession {
     private var currentDisplayID: CGDirectDisplayID?
 
     private var pollTimer: DispatchSourceTimer?
-    private var heartbeatTimer: DispatchSourceTimer?
     private var patternTimer: DispatchSourceTimer?
     private var screenObserver: NSObjectProtocol?
-    private var recovering = false
-    private var resetAttempts = 0
+    private var lastFlushErrorLogAt = Date.distantPast
     private var displayRecreations = 0
     private var lastFrameGeometry: (width: Int, height: Int, stride: Int, fourCC: OSType)?
     private var lastFlushAt = Date.distantPast
     private var flushDurationEMA: Double = 0
     private var currentMaxFrameRate = 60
     private var lastRateAdjustAt = Date.distantPast
-    // Hard ceiling on capture rate (defaults write com.leftshift.gud MaxFrameRate N).
-    // Some firmware crashes under sustained full-rate streaming regardless of
-    // USB flow control; this bounds the adaptive throttle.
+    // Hard ceiling on capture rate (defaults write com.leftshift.gud MaxFrameRate N);
+    // bounds the adaptive throttle. Pacing otherwise comes from the device
+    // itself, through USB flow control and damage merging, as in the Linux
+    // driver: nothing here lowers the rate in response to errors.
     private let frameRateCap = min(60, max(5, UserDefaults.standard.object(forKey: "MaxFrameRate") as? Int ?? 60))
-    // Lowered on each wedge; shared so they survive device re-enumeration.
-    private static var sustainableFrameRate = 60
     private static var fullFrameOnly = UserDefaults.standard.bool(forKey: "FullFrameOnly")
-    private var effectiveFrameRateCap: Int { min(frameRateCap, Self.sustainableFrameRate) }
 
     // Frame handoff between the capture sample queue and the flush queue.
     // A frame arriving mid-flush replaces the pending one; the tiles the
@@ -124,7 +120,6 @@ final class DeviceSession {
 
                 try configureConnector()
                 startPollingIfNeeded()
-                startHeartbeat()
                 installScreenObserver()
             } catch {
                 log.error("Device bring-up failed: \(String(describing: error), privacy: .public)")
@@ -314,14 +309,14 @@ final class DeviceSession {
             queue.asyncAfter(deadline: .now() + 0.5) { self.restartCapture() }
         }
         // A new stream starts at the cap; the throttle re-derives from there.
-        currentMaxFrameRate = effectiveFrameRateCap
+        currentMaxFrameRate = frameRateCap
         flushDurationEMA = 0
         Task { [weak self, capture, fbWidth, fbHeight, log] in
             for attempt in 0..<3 {
                 guard let self, !self.closed, self.currentDisplayID != nil else { return }
                 do {
                     try await capture.start(displayID: target, pixelWidth: fbWidth, pixelHeight: fbHeight,
-                                            maxFrameRate: self.effectiveFrameRateCap)
+                                            maxFrameRate: self.frameRateCap)
                     return
                 } catch {
                     log.error("Capture start failed (attempt \(attempt + 1)): \(String(describing: error), privacy: .public)")
@@ -496,70 +491,6 @@ final class DeviceSession {
         }
     }
 
-    // MARK: Wedge detection & recovery
-
-    // Real firmware has been observed to crash and stop responding on EP0
-    // ("frozen until unplug"). Detect it — via failed mandatory flushes or the
-    // idle heartbeat — and force a USB reset. The device re-enumerates as a
-    // new service, this session closes, and the monitor attaches a fresh one.
-    private func recoverFromWedge(context: String) {
-        stateLock.lock()
-        let alreadyRecovering = recovering
-        recovering = true
-        resetAttempts += 1
-        let attempts = resetAttempts
-        stateLock.unlock()
-        guard !alreadyRecovering else { return }
-        // Don't hammer firmware that reset can't revive; leave it for a replug.
-        guard attempts <= 3 else {
-            log.error("Device still unresponsive after \(attempts - 1, privacy: .public) resets; giving up until replug")
-            close(deviceGone: true)
-            return
-        }
-        // Back off hard on throughput — sustained streaming is what kills this
-        // class of firmware — then try to recover WITHOUT a USB reset, since a
-        // reset re-enumerates the device and in practice needs a physical
-        // replug. Reset is the last resort.
-        Self.sustainableFrameRate = max(4, Self.sustainableFrameRate / 2)
-        log.error("Device unresponsive (\(context, privacy: .public)); pausing stream, capping capture at \(Self.sustainableFrameRate, privacy: .public) fps (attempt \(attempts, privacy: .public))")
-        capture.stop()
-
-        // Give the firmware a chance to drain and come back on its own.
-        queue.asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard let self, !closed else { return }
-            if (try? client.ping()) != nil {
-                log.info("Device responsive again; resuming at \(Self.sustainableFrameRate, privacy: .public) fps")
-                stateLock.lock(); recovering = false; stateLock.unlock()
-                if let displayID = currentDisplayID { startCapture(displayID: displayID) }
-                return
-            }
-            log.error("Device still unresponsive after pause; resetting (re-enumerates, may need a replug)")
-            try? transport.resetDevice()
-        }
-        return
-        // Termination fires close(deviceGone: true); if reset itself failed the
-        // device is beyond software recovery until replug.
-    }
-
-    // While no frames are flowing nothing would notice a dead device; ping
-    // EP0 during idle so recovery starts before the user sees a frozen frame.
-    private func startHeartbeat() {
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 3, repeating: 3)
-        timer.setEventHandler { [weak self] in
-            guard let self, !closed else { return }
-            stateLock.lock()
-            let idle = Date().timeIntervalSince(lastFlushAt) > 3
-            stateLock.unlock()
-            guard idle else { return }
-            if (try? client.ping()) == nil {
-                recoverFromWedge(context: "idle heartbeat")
-            }
-        }
-        timer.resume()
-        heartbeatTimer = timer
-    }
-
     // Adapt the capture rate to what the device actually sustains, so slow
     // firmware is paced by us rather than drowned.
     private func noteFlushDuration(_ duration: TimeInterval) {
@@ -570,7 +501,7 @@ final class DeviceSession {
         // the throttle only needs to keep the CPU honest, not protect USB.
         flushDurationEMA = flushDurationEMA == 0 ? duration : flushDurationEMA * 0.95 + duration * 0.05
         guard flushDurationEMA > 0 else { return }
-        let cap = effectiveFrameRateCap
+        let cap = frameRateCap
         var sustainable = min(cap, max(5, Int(1.0 / flushDurationEMA)))
         // Snap to the cap when close to it and rate-limit changes.
         if sustainable >= cap - 15 { sustainable = cap }
@@ -716,26 +647,25 @@ final class DeviceSession {
         }
     }
 
+    // Same policy as the Linux gud driver (gud_flush_damage): a failed
+    // transfer abandons the rest of this flush, is logged rate-limited, and
+    // the next damage simply tries again. No retry, no ping, no reset, no
+    // rate change: a device that is gone is torn down by the termination
+    // handler, and one that is merely slow is paced by USB flow control.
     private func send(_ transfer: PendingTransfer) -> Bool {
         let band = transfer.rect
         do {
             try client.flush(x: band.x, y: band.y, width: band.width, height: band.height,
                              uncompressedLength: transfer.uncompressedLength,
                              payload: transfer.payload, compressed: transfer.compressed)
+            return true
         } catch {
-            // Protocol policy: retry once, then drop until new damage.
-            log.warning("Flush failed, retrying once: \(String(describing: error), privacy: .public)")
-            guard (try? client.flush(x: band.x, y: band.y, width: band.width, height: band.height,
-                                     uncompressedLength: transfer.uncompressedLength,
-                                     payload: transfer.payload, compressed: transfer.compressed)) != nil
-            else {
-                // SET_BUFFER and the bulk pipe are mandatory on every device;
-                // failing both attempts means the firmware is gone.
-                recoverFromWedge(context: "flush failed after retry")
-                return false
+            if Date().timeIntervalSince(lastFlushErrorLogAt) >= 5 {
+                lastFlushErrorLogAt = Date()
+                log.error("Failed to flush framebuffer: \(String(describing: error), privacy: .public)")
             }
+            return false
         }
-        return true
     }
 
     // MARK: Stats
@@ -797,8 +727,6 @@ final class DeviceSession {
             closed = true
             pollTimer?.cancel()
             pollTimer = nil
-            heartbeatTimer?.cancel()
-            heartbeatTimer = nil
             patternTimer?.cancel()
             patternTimer = nil
             capture.stop()

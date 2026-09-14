@@ -94,9 +94,15 @@ unlikely to be partial-rect handling or unaligned writes. The remaining
 hypothesis is that the device cannot both absorb USB data and scan out the CRT
 at that rate, and overruns.
 
-Current mitigation: on a wedge, pause the stream, halve the frame-rate ceiling,
-wait, and ping — resume if the firmware recovers on its own. A USB reset is a
-last resort because in practice it requires a physical replug.
+The app used to detect this (idle EP0 ping, failed flushes), halve a
+process-wide frame-rate ceiling on every occurrence and eventually reset the
+device. That ceiling never recovered, so every reflash or replug of a healthy
+device also cost half the frame rate until the app was relaunched. It now
+follows the Linux driver instead: a failed flush is logged and abandoned, the
+next damage tries again, and a device that disappears is torn down by the
+IOKit termination notification. Pacing comes from USB flow control and damage
+merging. `defaults write com.leftshift.gud MaxFrameRate N` remains as a hard
+cap for firmware that needs one.
 
 **Next step:** read the USB link speed logged at connect (`USB link: ...`). If
 this is a full-speed (12 Mbps ≈ 1.2 MB/s) device, 264 KB frames cap out around

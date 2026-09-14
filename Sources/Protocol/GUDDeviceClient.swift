@@ -23,6 +23,9 @@ final class GUDDeviceClient {
     private let ioLock = NSRecursiveLock()
 
     private(set) var descriptor: GUD.DisplayDescriptor?
+    // After a failed flush the device may be mid-transfer; re-send SET_BUFFER
+    // on the next one even for FULL_UPDATE devices (Linux: prev_flush_failed).
+    private var prevFlushFailed = false
     private(set) var formats: [GUD.PixelFormat] = []
     private(set) var connectors: [GUD.Connector] = []
     private(set) var connectorProperties: [[GUD.Property]] = []
@@ -151,14 +154,19 @@ final class GUDDeviceClient {
             compression: compressed ? GUD.compressionLZ4 : 0,
             compressedLength: compressed ? UInt32(payload.length) : 0
         )
-        if descriptor?.flags.contains(.fullUpdate) != true {
-            try controlOut(.setBuffer, data: header.encoded())
-        }
         do {
+            if descriptor?.flags.contains(.fullUpdate) != true || prevFlushFailed {
+                try controlOut(.setBuffer, data: header.encoded())
+            }
             try transport.bulkWrite(payload)
+        } catch let error as GUDClientError {
+            prevFlushFailed = true
+            throw error
         } catch {
+            prevFlushFailed = true
             throw GUDClientError.transport(error)
         }
+        prevFlushFailed = false
     }
 
     // MARK: Control plumbing

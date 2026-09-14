@@ -42,7 +42,7 @@ defines it: partial rectangles, `max_buffer_size` bands, standard LZ4 blocks.
 
 ## Status
 
-Tested against the RCade adapter driving a CRT at its native 336×262. Other GUD devices (gud-gadget on a Pi or phone, Pico and ESP32 boards) should work but have not been verified; if you have one, please open an issue with what you see. See [docs/hardware-notes.md](docs/hardware-notes.md) for device findings and [docs/next-steps.md](docs/next-steps.md) for known gaps.
+Tested against the RCade adapter driving a CRT at its native 336×262. Other GUD devices (gud-gadget on a Pi or phone, Pico and ESP32 boards) should work but have not been verified; if you have one, please open an issue with what you see. See [docs/hardware-notes.md](docs/hardware-notes.md) for device findings.
 
 ## Building
 

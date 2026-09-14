@@ -11,7 +11,12 @@
                      com.apple.vm.device-access, which GUD devices never
                      require.
     ScreenCaptureKit - gated by TCC (Screen Recording) at runtime, not by an
-                     entitlement.
+                     entitlement. macOS 15 re-asks for that permission
+                     monthly; the restricted
+                     com.apple.developer.persistent-content-capture
+                     entitlement suppresses the prompt, but it needs Apple's
+                     approval and a provisioning profile that carries it,
+                     so it is not here yet.
     CGVirtualDisplay - private CoreGraphics SPI; resolved at runtime.
     Sparkle        - needs extra entitlements only in sandboxed apps.
 

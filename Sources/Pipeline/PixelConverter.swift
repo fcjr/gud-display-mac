@@ -1,7 +1,7 @@
 import Foundation
 import CoreVideo
 
-struct DamageRect {
+struct DamageRect: Equatable {
     var x: Int
     var y: Int
     var width: Int

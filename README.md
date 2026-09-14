@@ -24,6 +24,22 @@ Requires macOS 14 (Sonoma) or later. Builds are signed and notarized, and the ap
 
 The menu bar item shows the connected device, lets you pick a resolution from the modes the device advertises, and toggles Launch at Login.
 
+## Performance
+
+Frames go out as damage rectangles, not whole frames. ScreenCaptureKit
+reports no dirty rects on a scaled stream, so each captured frame is diffed
+against the previous one in 16-pixel tiles and the changed tiles are grouped
+into a few rectangles (`DamageTracker`). A moving cursor or a line of typing
+costs a couple of kilobytes; on a full-speed USB device that is the
+difference between 4 fps and the capture rate. Rectangles are converted and
+LZ4-compressed on the capture queue while the previous frame is still on the
+bus, so the link never waits on the CPU.
+
+Compression uses LZ4 HC level 6 by default (`defaults write com.leftshift.gud
+LZ4Level N`; 0 is plain LZ4, up to 12), about 20% fewer bytes than plain LZ4
+on text. All of this is within the GUD wire protocol as the Linux driver
+defines it: partial rectangles, `max_buffer_size` bands, standard LZ4 blocks.
+
 ## Status
 
 Tested against the RCade adapter driving a CRT at its native 336×262. Other GUD devices (gud-gadget on a Pi or phone, Pico and ESP32 boards) should work but have not been verified; if you have one, please open an issue with what you see. See [docs/hardware-notes.md](docs/hardware-notes.md) for device findings and [docs/next-steps.md](docs/next-steps.md) for known gaps.

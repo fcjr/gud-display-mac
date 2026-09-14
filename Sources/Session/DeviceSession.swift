@@ -50,20 +50,35 @@ final class DeviceSession {
     private var effectiveFrameRateCap: Int { min(frameRateCap, Self.sustainableFrameRate) }
 
     // Frame handoff between the capture sample queue and the flush queue.
-    // A frame arriving mid-flush replaces the pending one, its damage unioned,
-    // so no dirty region is ever silently dropped.
+    // A frame arriving mid-flush replaces the pending one; the tiles the
+    // replaced frame changed are carried into the next diff, so no dirty
+    // region is ever silently dropped.
     private let stateLock = NSLock()
-    private var pendingDamage: DamageRect?
     private var pendingSlot: Int?
-    private var pendingRect: DamageRect?
     private var readingSlot: Int?
     private var flushInFlight = false
 
-    // Double-buffered so the sample queue can convert the next frame while the
-    // flush queue is still transferring the previous one.
-    private let packBuffers = [NSMutableData(), NSMutableData()]
-    private let bandBuffer = NSMutableData()
-    private let compressBuffer = NSMutableData()
+    // One transfer: a band of one damage rect, already in the device format
+    // and (when it helps) LZ4 compressed, so the flush queue only moves bytes.
+    private struct PendingTransfer {
+        var rect: DamageRect
+        var payload: NSMutableData
+        var uncompressedLength: Int
+        var compressed: Bool
+    }
+
+    // Double-buffered so the sample queue can convert and compress the next
+    // frame while the flush queue is still transferring the previous one.
+    private final class FrameSlot {
+        var transfers: [PendingTransfer] = []
+        var tiles: [Bool] = []
+        let packBuffer = NSMutableData()
+        // Reused across frames; grows to the most bands a frame has needed.
+        var payloadBuffers: [NSMutableData] = []
+        var scratch = NSMutableData()
+    }
+    private let slots = [FrameSlot(), FrameSlot()]
+    private var damageTracker: DamageTracker?
 
     // Cumulative flush counters; the menu reads and resets them to derive rates.
     private let statsLock = NSLock()
@@ -249,11 +264,11 @@ final class DeviceSession {
         timer.schedule(deadline: .now(), repeating: 2)
         timer.setEventHandler { [weak self] in
             guard let self, !closed else { return }
-            PixelConverter.testPattern(width: fbWidth, height: fbHeight, format: format, into: packBuffers[0])
+            PixelConverter.testPattern(width: fbWidth, height: fbHeight, format: format, into: slots[0].packBuffer)
             do {
                 try client.flush(x: 0, y: 0, width: fbWidth, height: fbHeight,
-                                 uncompressedLength: packBuffers[0].length, payload: packBuffers[0], compressed: false)
-                log.info("Test pattern sent (\(self.packBuffers[0].length, privacy: .public) bytes)")
+                                 uncompressedLength: slots[0].packBuffer.length, payload: slots[0].packBuffer, compressed: false)
+                log.info("Test pattern sent (\(self.slots[0].packBuffer.length, privacy: .public) bytes)")
             } catch {
                 log.error("Test pattern flush failed: \(String(describing: error), privacy: .public)")
             }
@@ -548,16 +563,19 @@ final class DeviceSession {
     // Adapt the capture rate to what the device actually sustains, so slow
     // firmware is paced by us rather than drowned.
     private func noteFlushDuration(_ duration: TimeInterval) {
-        flushDurationEMA = flushDurationEMA == 0 ? duration : flushDurationEMA * 0.8 + duration * 0.2
+        // Slow EMA: with damage tracking, flush times swing from under a
+        // millisecond (a cursor) to over a hundred (a full redraw) frame to
+        // frame, and every rate change reconfigures the live capture stream.
+        // Frames that arrive faster than they can be flushed are merged, so
+        // the throttle only needs to keep the CPU honest, not protect USB.
+        flushDurationEMA = flushDurationEMA == 0 ? duration : flushDurationEMA * 0.95 + duration * 0.05
         guard flushDurationEMA > 0 else { return }
         let cap = effectiveFrameRateCap
-        var sustainable = min(cap, max(5, Int(0.9 / flushDurationEMA)))
-        // Snap to the cap when close to it and rate-limit changes: every
-        // adjustment reconfigures the live stream, and a rate hovering near
-        // the cap otherwise flaps several times a second.
-        if sustainable >= cap - 10 { sustainable = cap }
-        guard abs(sustainable - currentMaxFrameRate) >= 5,
-              Date().timeIntervalSince(lastRateAdjustAt) >= 2
+        var sustainable = min(cap, max(5, Int(1.0 / flushDurationEMA)))
+        // Snap to the cap when close to it and rate-limit changes.
+        if sustainable >= cap - 15 { sustainable = cap }
+        guard abs(sustainable - currentMaxFrameRate) >= 10,
+              Date().timeIntervalSince(lastRateAdjustAt) >= 5
         else { return }
         currentMaxFrameRate = sustainable
         lastRateAdjustAt = Date()
@@ -567,8 +585,9 @@ final class DeviceSession {
 
     // MARK: Frame pipeline
 
-    // Runs on the capture sample queue: compute this frame's damage, then
-    // either kick off a flush or fold it into the pending frame.
+    // Runs on the capture sample queue: work out what changed, convert and
+    // compress those rects, then either kick off a flush or leave the frame
+    // pending for the flush loop to pick up.
     private func handle(frame: CaptureController.Frame) {
         let bufW = CVPixelBufferGetWidth(frame.pixelBuffer)
         let bufH = CVPixelBufferGetHeight(frame.pixelBuffer)
@@ -586,39 +605,77 @@ final class DeviceSession {
         }
         // Never ship a buffer the converter can't read as tightly-cropped BGRA.
         guard usable else { return }
-        let full = DamageRect(x: 0, y: 0, width: fbWidth, height: fbHeight)
-        var damage: DamageRect
-        if frame.isFirstFrame || frame.dirtyRects.isEmpty || Self.fullFrameOnly
-            || client.descriptor?.flags.contains(.fullUpdate) == true
-        {
-            damage = full
-        } else {
-            damage = frame.dirtyRects
-                .map { DamageRect(x: Int($0.minX), y: Int($0.minY), width: Int($0.width.rounded(.up)), height: Int($0.height.rounded(.up))) }
-                .reduce(nil) { acc, rect in acc.map { DamageRect.union($0, rect) } ?? rect }!
-        }
-        damage = damage.clamped(toWidth: fbWidth, height: fbHeight)
-        guard damage.width > 0, damage.height > 0 else { return }
 
-        // Convert to the device format HERE, on the sample queue, while the
-        // IOSurface is guaranteed live. ScreenCaptureKit recycles buffers from
-        // a small pool, so reading one on the flush queue after this callback
-        // returns races the compositor and ships stale or torn pixels.
+        if damageTracker == nil || damageTracker?.width != fbWidth || damageTracker?.height != fbHeight {
+            damageTracker = DamageTracker(width: fbWidth, height: fbHeight)
+        }
+
+        // A packed frame the flush loop hasn't taken yet is about to be
+        // replaced: whatever it changed must ride along with this one.
         stateLock.lock()
-        let merged = pendingDamage.map { DamageRect.union($0, damage) } ?? damage
-        // Never write into the buffer the flush queue is currently reading.
         let slot = readingSlot == 0 ? 1 : 0
+        if let pending = pendingSlot, pending == slot {
+            damageTracker?.carry(tiles: slots[pending].tiles)
+        }
         stateLock.unlock()
 
-        let aligned = merged.aligned(for: format, fbWidth: fbWidth)
-        guard aligned.width > 0, aligned.height > 0,
-              PixelConverter.pack(frame.pixelBuffer, rect: aligned, as: format, into: packBuffers[slot])
+        // Devices that need every flush to be the whole framebuffer, or the
+        // debugging default, force full damage. ScreenCaptureKit's own dirty
+        // rects are unusable here: a scaled stream reports none.
+        let forceFull = frame.isFirstFrame || Self.fullFrameOnly
+            || client.descriptor?.flags.contains(.fullUpdate) == true
+
+        // Everything that reads the IOSurface happens HERE, on the sample
+        // queue, while it is guaranteed live. ScreenCaptureKit recycles buffers
+        // from a small pool, so reading one on the flush queue after this
+        // callback returns races the compositor and ships stale or torn pixels.
+        guard CVPixelBufferLockBaseAddress(frame.pixelBuffer, .readOnly) == kCVReturnSuccess else { return }
+        defer { CVPixelBufferUnlockBaseAddress(frame.pixelBuffer, .readOnly) }
+        guard let tiles = damageTracker?.update(frame.pixelBuffer, forceFull: forceFull),
+              let rects = damageTracker?.rects(for: tiles), !rects.isEmpty
         else { return }
+
+        let frameSlot = slots[slot]
+        frameSlot.tiles = tiles
+        frameSlot.transfers.removeAll(keepingCapacity: true)
+        var bufferIndex = 0
+        for rect in rects {
+            let aligned = rect.aligned(for: format, fbWidth: fbWidth)
+            guard aligned.width > 0, aligned.height > 0,
+                  PixelConverter.pack(frame.pixelBuffer, rect: aligned, as: format, into: frameSlot.packBuffer)
+            else { continue }
+            // Whole-line bands no larger than the device's transfer limit
+            // (which applies to the uncompressed size), compressed now so the
+            // flush queue only has to push bytes.
+            let pitch = format.minPitch(width: aligned.width)
+            let linesPerBand = max(1, maxTransferBytes / max(1, pitch))
+            var row = 0
+            while row < aligned.height {
+                let bandHeight = min(linesPerBand, aligned.height - row)
+                let band = DamageRect(x: aligned.x, y: aligned.y + row, width: aligned.width, height: bandHeight)
+                let length = bandHeight * pitch
+                let source = frameSlot.packBuffer.bytes + row * pitch
+                while frameSlot.payloadBuffers.count <= bufferIndex {
+                    frameSlot.payloadBuffers.append(NSMutableData())
+                }
+                let payload = frameSlot.payloadBuffers[bufferIndex]
+                bufferIndex += 1
+                var compressed = false
+                if compressionEnabled, LZ4Compressor.compress(source, length: length, into: payload) {
+                    compressed = true
+                } else {
+                    payload.length = length
+                    payload.mutableBytes.copyMemory(from: source, byteCount: length)
+                }
+                frameSlot.transfers.append(PendingTransfer(rect: band, payload: payload,
+                                                           uncompressedLength: length, compressed: compressed))
+                row += bandHeight
+            }
+        }
+        guard !frameSlot.transfers.isEmpty else { return }
 
         stateLock.lock()
         pendingSlot = slot
-        pendingRect = aligned
-        pendingDamage = nil
         let shouldStart = !flushInFlight
         if shouldStart { flushInFlight = true }
         stateLock.unlock()
@@ -632,20 +689,25 @@ final class DeviceSession {
     private func flushLoop() {
         while true {
             stateLock.lock()
-            guard let slot = pendingSlot, let rect = pendingRect else {
+            guard let slot = pendingSlot else {
                 flushInFlight = false
                 stateLock.unlock()
                 return
             }
             pendingSlot = nil
-            pendingRect = nil
             readingSlot = slot
             stateLock.unlock()
 
             let started = Date()
-            flush(packed: packBuffers[slot], damage: rect)
+            var bytes = 0
+            var pixelBytes = 0
+            for transfer in slots[slot].transfers {
+                bytes += transfer.payload.length
+                pixelBytes += transfer.uncompressedLength
+                guard send(transfer) else { break }
+            }
             noteFlushDuration(Date().timeIntervalSince(started))
-            recordFlush(bytes: 0)
+            recordFlush(bytes: bytes, pixelBytes: pixelBytes)
 
             stateLock.lock()
             readingSlot = nil
@@ -654,47 +716,18 @@ final class DeviceSession {
         }
     }
 
-    // `packed` already holds the rect's pixels in the device format, tightly
-    // packed. Split into whole-line bands no larger than the transfer limit
-    // (which applies to the uncompressed size).
-    private func flush(packed: NSMutableData, damage: DamageRect) {
-        let pitch = format.minPitch(width: damage.width)
-        let linesPerBand = max(1, maxTransferBytes / max(1, pitch))
-        var row = 0
-        while row < damage.height {
-            let bandHeight = min(linesPerBand, damage.height - row)
-            let band = DamageRect(x: damage.x, y: damage.y + row, width: damage.width, height: bandHeight)
-            let byteRange = NSRange(location: row * pitch, length: bandHeight * pitch)
-            guard byteRange.upperBound <= packed.length else { return }
-            bandBuffer.length = byteRange.length
-            packed.getBytes(bandBuffer.mutableBytes, range: byteRange)
-            guard flushBand(band) else { return }
-            row += bandHeight
-        }
-    }
-
-    private func flushBand(_ band: DamageRect) -> Bool {
-        var payload = bandBuffer
-        var compressed = false
-        if compressionEnabled,
-           LZ4Compressor.compress(bandBuffer.bytes, length: bandBuffer.length, into: compressBuffer)
-        {
-            payload = compressBuffer
-            compressed = true
-        }
-
-        let uncompressedLength = bandBuffer.length
-        statsLock.lock()
-        statBytes += payload.length
-        statsLock.unlock()
+    private func send(_ transfer: PendingTransfer) -> Bool {
+        let band = transfer.rect
         do {
             try client.flush(x: band.x, y: band.y, width: band.width, height: band.height,
-                             uncompressedLength: uncompressedLength, payload: payload, compressed: compressed)
+                             uncompressedLength: transfer.uncompressedLength,
+                             payload: transfer.payload, compressed: transfer.compressed)
         } catch {
             // Protocol policy: retry once, then drop until new damage.
             log.warning("Flush failed, retrying once: \(String(describing: error), privacy: .public)")
             guard (try? client.flush(x: band.x, y: band.y, width: band.width, height: band.height,
-                                     uncompressedLength: uncompressedLength, payload: payload, compressed: compressed)) != nil
+                                     uncompressedLength: transfer.uncompressedLength,
+                                     payload: transfer.payload, compressed: transfer.compressed)) != nil
             else {
                 // SET_BUFFER and the bulk pipe are mandatory on every device;
                 // failing both attempts means the firmware is gone.
@@ -717,16 +750,21 @@ final class DeviceSession {
     }
 
     private var totalFlushes = 0
+    private var totalWireBytes = 0
+    private var totalPixelBytes = 0
 
-    private func recordFlush(bytes: Int) {
+    private func recordFlush(bytes: Int, pixelBytes: Int) {
         statsLock.lock()
         statFrames += 1
         statBytes += bytes
         totalFlushes += 1
+        totalWireBytes += bytes
+        totalPixelBytes += pixelBytes
         let count = totalFlushes
+        let (wire, pixels) = (totalWireBytes, totalPixelBytes)
         statsLock.unlock()
         if count == 1 || count % 600 == 0 {
-            log.info("Flushed \(count, privacy: .public) frames to device")
+            log.info("Flushed \(count, privacy: .public) frames: \(wire / 1024, privacy: .public) KB on the wire for \(pixels / 1024, privacy: .public) KB of pixels (LZ4 level \(LZ4Compressor.level, privacy: .public))")
         }
     }
 

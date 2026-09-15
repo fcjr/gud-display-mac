@@ -193,6 +193,9 @@ enum GUD {
         static let byteSize = 10
         // GUD_PROPERTY_BACKLIGHT_BRIGHTNESS, a connector property, 0 to 100.
         static let backlightBrightness: UInt16 = 12
+        // GUD_PROPERTY_ROTATION, a plane property: GET_PROPERTIES carries the
+        // supported bitmask, the state carries one Rotation bit.
+        static let rotation: UInt16 = 50
 
         let prop: UInt16
         let val: UInt64
@@ -206,6 +209,51 @@ enum GUD {
             guard data.count >= offset + Self.byteSize else { return nil }
             prop = data.leUInt16(at: offset)
             val = data.leUInt64(at: offset + 2)
+        }
+    }
+
+    // GUD_ROTATION_* bits, which are DRM's: rotation of the framebuffer,
+    // counter-clockwise. For 90 and 270 the framebuffer the host sends has
+    // the panel's width and height swapped and the device turns it upright.
+    enum Rotation: UInt64, CaseIterable {
+        case rotate0 = 1
+        case rotate90 = 2
+        case rotate180 = 4
+        case rotate270 = 8
+
+        static let reflectX: UInt64 = 16
+        static let reflectY: UInt64 = 32
+        static let mask: UInt64 = 0x3F
+
+        var swapsAxes: Bool {
+            self == .rotate90 || self == .rotate270
+        }
+
+        // macOS rotates a display clockwise by the angle CGDisplayRotation
+        // reports; DRM counts counter-clockwise.
+        init?(displayDegrees: Double) {
+            switch Int(displayDegrees.rounded()) % 360 {
+            case 0: self = .rotate0
+            case 90: self = .rotate270
+            case 180: self = .rotate180
+            case 270: self = .rotate90
+            default: return nil
+            }
+        }
+
+        // The clockwise angle a user would call it, as macOS labels rotation.
+        var displayDegrees: Int {
+            switch self {
+            case .rotate0: return 0
+            case .rotate90: return 270
+            case .rotate180: return 180
+            case .rotate270: return 90
+            }
+        }
+
+        // Framebuffer size for a panel mode under this rotation.
+        func framebufferSize(width: Int, height: Int) -> (width: Int, height: Int) {
+            swapsAxes ? (height, width) : (width, height)
         }
     }
 

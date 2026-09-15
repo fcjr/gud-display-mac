@@ -123,3 +123,32 @@ bugs: corner colors reveal orientation and channel order, the 32-pixel grid
 reveals row pitch (a wrong stride shears the vertical bars into diagonals), and
 the diagonal reveals combined width/pitch errors. If the pattern is correct,
 the USB path is sound and the bug is upstream in capture.
+
+## Touch screens
+
+GUD carries pixels only; a panel's touch controller is exposed as a
+separate USB HID touch screen interface (Digitizer page, Touch Screen
+usage) on the same composite device, the way Linux's hid-multitouch expects.
+
+macOS binds its own HID driver to any such interface and turns it into an
+absolute pointer, but without a vendor driver it maps the digitizer's
+coordinate space onto the **main display**, not onto the virtual display
+this app created for the same device. Touching the little panel would move
+the cursor around the primary monitor.
+
+`TouchInputController` therefore opens the HID device with
+`kIOHIDOptionsTypeSeizeDevice`. A seized device delivers reports only to the
+seizing client; the system's event driver stops receiving them. Contacts are
+read by usage from the device's parsed elements (Tip Switch, X, Y under each
+Finger collection) rather than by report offset, so any descriptor layout
+that follows the digitizer usage tables works. Each contact is scaled into
+`CGDisplayBounds` of the virtual display and posted as `CGEvent` mouse
+down/drag/up on the HID event tap.
+
+Two TCC grants are involved, both requested only once a touch device is
+actually matched: Input Monitoring (needed to open, and so to seize, a HID
+device that produces system input) and Accessibility (needed to post
+synthetic mouse events). Neither can be verified without the hardware: the
+seize itself and whether the kernel's element values are current by the time
+the raw report callback runs were designed from IOHIDFamily's behaviour, not
+observed here.

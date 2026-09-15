@@ -94,7 +94,7 @@ final class VirtualDisplayController {
     @discardableResult
     func selectMode(width: Int, height: Int, on displayID: CGDirectDisplayID) -> Bool {
         for _ in 0..<20 {
-            if CGDisplayCopyDisplayMode(displayID)?.pixelWidth == width {
+            if let current = CGDisplayCopyDisplayMode(displayID), current.pixelWidth == width, current.pixelHeight == height {
                 return true
             }
             // Low-resolution modes are omitted unless explicitly requested,
@@ -107,7 +107,8 @@ final class VirtualDisplayController {
             }
             Thread.sleep(forTimeInterval: 0.15)
         }
-        return CGDisplayCopyDisplayMode(displayID)?.pixelWidth == width
+        guard let current = CGDisplayCopyDisplayMode(displayID) else { return false }
+        return current.pixelWidth == width && current.pixelHeight == height
     }
 
     func destroy() {

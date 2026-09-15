@@ -213,4 +213,43 @@ final class GUDClientTests: XCTestCase {
         ))
         XCTAssertThrowsError(try GUDDeviceClient(transport: wrongVersion).initialize())
     }
+
+    func testRotationPropertyIsParsedAndSentWithTheState() throws {
+        var profile = MockGUDTransport.kernelGadget().profile
+        // GUD_PROPERTY_ROTATION (50) offering 0/90/180/270, followed by an
+        // unknown plane property that must be passed through untouched.
+        profile.properties = Data([50, 0, 0x0F, 0, 0, 0, 0, 0, 0, 0,
+                                   99, 0, 7, 0, 0, 0, 0, 0, 0, 0])
+        let client = GUDDeviceClient(transport: MockGUDTransport(profile: profile))
+        try client.initialize()
+        XCTAssertEqual(client.supportedRotations, 0x0F)
+        XCTAssertTrue(client.supports(.rotate270))
+        XCTAssertEqual(client.planeProperties.count, 2)
+        XCTAssertEqual(client.planeProperties[1], GUD.Property(prop: 99, val: 7))
+
+        let none = GUDDeviceClient(transport: MockGUDTransport.kernelGadget())
+        try none.initialize()
+        XCTAssertEqual(none.supportedRotations, 0)
+        XCTAssertFalse(none.supports(.rotate0))
+
+        // ROTATE_0 is mandatory; a device without it offers nothing usable.
+        profile.properties = Data([50, 0, 0x0E, 0, 0, 0, 0, 0, 0, 0])
+        let broken = GUDDeviceClient(transport: MockGUDTransport(profile: profile))
+        try broken.initialize()
+        XCTAssertEqual(broken.supportedRotations, 0)
+    }
+
+    func testRotationMatchesDisplaySettingsAndTurnsTheFramebuffer() {
+        XCTAssertEqual(GUD.Rotation(displayDegrees: 0), .rotate0)
+        XCTAssertEqual(GUD.Rotation(displayDegrees: 90), .rotate270)
+        XCTAssertEqual(GUD.Rotation(displayDegrees: 180), .rotate180)
+        XCTAssertEqual(GUD.Rotation(displayDegrees: 270), .rotate90)
+        XCTAssertNil(GUD.Rotation(displayDegrees: 45))
+        XCTAssertEqual(GUD.Rotation.rotate90.framebufferSize(width: 240, height: 280).width, 280)
+        XCTAssertEqual(GUD.Rotation.rotate180.framebufferSize(width: 240, height: 280).width, 240)
+        let encoded = GUD.StateRequest(mode: GUD.DisplayMode(parsing: Data(repeating: 0, count: 24), at: 0)!,
+                                       format: .rgb565, connector: 0,
+                                       properties: [GUD.Property(prop: GUD.Property.rotation, val: GUD.Rotation.rotate90.rawValue)]).encoded()
+        XCTAssertEqual(Array(encoded.suffix(10)), [50, 0, 2, 0, 0, 0, 0, 0, 0, 0])
+    }
 }

@@ -65,11 +65,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        if !ScreenRecordingPermission.granted {
-            let item = NSMenuItem(title: "⚠︎ Screen Recording permission missing",
-                                  action: #selector(openPermissionSettings), keyEquivalent: "")
-            item.target = self
-            menu.addItem(item)
+        let missing = AppPermission.allCases.filter { !$0.granted }
+        if !missing.isEmpty {
+            for permission in missing {
+                menu.addItem(permissionItem(permission))
+            }
             menu.addItem(.separator())
         }
 
@@ -80,6 +80,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let size = session.currentPixelSize
                 menu.addItem(disabledItem("\(session.displayName) — \(size.width)×\(size.height)"))
                 menu.addItem(disabledItem("    " + statsLine(for: key, session: session)))
+                if let status = session.touchStatus {
+                    menu.addItem(touchItem(status))
+                    if session.touchAvailable {
+                        let toggle = NSMenuItem(title: "    Touch", action: #selector(toggleTouch(_:)), keyEquivalent: "")
+                        toggle.target = self
+                        toggle.representedObject = session
+                        toggle.state = session.touchEnabled ? .on : .off
+                        menu.addItem(toggle)
+                    }
+                }
 
                 let previewItem = NSMenuItem(title: "    Open Display Window",
                                               action: #selector(openDisplayWindow(_:)), keyEquivalent: "")
@@ -93,12 +103,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                           action: #selector(selectResolution(_:)), keyEquivalent: "")
                     item.target = self
                     item.representedObject = ResolutionChoice(session: session, width: choice.width, height: choice.height)
-                    item.state = choice.width == size.width && choice.height == size.height ? .on : .off
+                    let panel = session.currentPanelSize
+                    item.state = choice.width == panel.width && choice.height == panel.height ? .on : .off
                     resolutionMenu.addItem(item)
                 }
                 let resolutionItem = NSMenuItem(title: "    Resolution", action: nil, keyEquivalent: "")
                 resolutionItem.submenu = resolutionMenu
                 menu.addItem(resolutionItem)
+                let rotations = session.rotationChoices
+                if !rotations.isEmpty {
+                    let rotationMenu = NSMenu()
+                    let current = session.currentRotation
+                    for rotation in rotations.sorted(by: { $0.displayDegrees < $1.displayDegrees }) {
+                        let item = NSMenuItem(title: "\(rotation.displayDegrees)°",
+                                              action: #selector(selectRotation(_:)), keyEquivalent: "")
+                        item.target = self
+                        item.representedObject = RotationChoice(session: session, rotation: rotation)
+                        item.state = rotation == current ? .on : .off
+                        rotationMenu.addItem(item)
+                    }
+                    let rotationItem = NSMenuItem(title: "    Rotation", action: nil, keyEquivalent: "")
+                    rotationItem.submenu = rotationMenu
+                    menu.addItem(rotationItem)
+                }
                 if let brightness = session.brightness {
                     menu.addItem(disabledItem("    Brightness"))
                     menu.addItem(brightnessItem(for: session, value: brightness))
@@ -107,6 +134,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
+        menu.addItem(.separator())
+
+        // Every grant the app can use, checked live each time the menu opens.
+        menu.addItem(disabledItem("Permissions"))
+        for permission in AppPermission.allCases {
+            menu.addItem(permissionItem(permission))
+        }
         menu.addItem(.separator())
 
         let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
@@ -153,6 +187,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
+    // A missing permission is a link to the pane that grants it.
+    private func touchItem(_ status: String) -> NSMenuItem {
+        let permission: AppPermission? = status.contains("Input Monitoring") ? .inputMonitoring
+            : status.contains("Accessibility") ? .accessibility : nil
+        guard let permission else { return disabledItem("    " + status) }
+        let item = NSMenuItem(title: "    ⚠︎ " + status, action: #selector(openPermissionSettings(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = permission
+        return item
+    }
+
+    // Granted: a ticked, inert line. Missing: a button to the pane that grants it.
+    private func permissionItem(_ permission: AppPermission) -> NSMenuItem {
+        let item: NSMenuItem
+        if permission.granted {
+            item = disabledItem("    ✓ " + permission.name)
+        } else {
+            item = NSMenuItem(title: "    ⚠︎ " + permission.name + " — Open System Settings…",
+                              action: #selector(openPermissionSettings(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = permission
+        }
+        item.toolTip = permission.purpose
+        return item
+    }
+
     private func disabledItem(_ title: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
@@ -170,6 +230,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self.width = width
             self.height = height
         }
+    }
+
+    private final class RotationChoice: NSObject {
+        let session: DeviceSession
+        let rotation: GUD.Rotation
+        init(session: DeviceSession, rotation: GUD.Rotation) {
+            self.session = session
+            self.rotation = rotation
+        }
+    }
+
+    @objc private func selectRotation(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? RotationChoice else { return }
+        choice.session.setRotation(choice.rotation)
     }
 
     @objc private func changeBrightness(_ sender: BrightnessSlider) {
@@ -197,7 +271,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updaterController.checkForUpdates(nil)
     }
 
-    @objc private func openPermissionSettings() {
-        ScreenRecordingPermission.openSystemSettings()
+    @objc private func openPermissionSettings(_ sender: NSMenuItem) {
+        (sender.representedObject as? AppPermission)?.openSystemSettings()
+    }
+
+    @objc private func toggleTouch(_ sender: NSMenuItem) {
+        guard let session = sender.representedObject as? DeviceSession else { return }
+        session.touchEnabled.toggle()
     }
 }

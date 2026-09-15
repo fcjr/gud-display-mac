@@ -22,7 +22,7 @@ Requires macOS 14 (Sonoma) or later. Builds are signed and notarized, and the ap
 2. Grant **Screen Recording** permission when prompted (System Settings › Privacy & Security › Screen Recording), then relaunch. macOS treats mirroring the virtual display as screen recording, so without it the device shows a black screen.
 3. Plug in your GUD device. A new display appears in System Settings › Displays and you can arrange it like any other monitor.
 
-The menu bar item shows the connected device, lets you pick a resolution from the modes the device advertises, and toggles Launch at Login.
+The menu bar item shows the connected device, lets you pick a resolution from the modes the device advertises, and toggles Launch at Login. Devices that advertise the GUD rotation property also get a **Rotation** submenu: macOS shows no Rotation control for a virtual display, so the app rebuilds the display in the turned shape, sends the rotation to the device, which turns the framebuffer in hardware, and turns touch to match. The choice is remembered per device. Its **Permissions** section checks Screen Recording, Input Monitoring and Accessibility every time the menu opens; a missing one is a button that opens the System Settings pane where it is granted, and missing ones are repeated at the top of the menu.
 
 For a small panel, choose **Open Display Window** under that device in the
 menu. This opens a live view on your main screen. Resizing keeps the display's
@@ -36,6 +36,18 @@ permissions are needed beyond Screen Recording.
 
 Each device has its own preview window. Closing or minimizing it stops the
 preview capture; the USB display keeps working.
+
+If the panel has a touch screen, the device exposes it as a standard USB HID
+touch screen next to the display interface, and GUD Display maps taps and
+drags onto the virtual display. macOS on its own would treat that digitizer
+as a pointer over your main screen, so the app takes the device over
+exclusively, which needs **Input Monitoring**, and posts the resulting
+clicks itself, which needs **Accessibility**. Both prompts appear only when
+a touch-capable device is plugged in; the menu shows which one is still
+missing under the device, and touch starts working as soon as both are
+granted. The **Touch** item under the device switches it off and on; off
+keeps the panel's touches from doing anything, and the choice is remembered
+per device.
 
 ## Performance
 

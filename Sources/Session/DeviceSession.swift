@@ -15,6 +15,7 @@ final class DeviceSession {
     private let client: GUDDeviceClient
     private let virtualDisplay = VirtualDisplayController()
     private let capture = CaptureController()
+    private var touch: TouchInputController?
     // Window ownership and all access to it stay on the main queue.
     private var displayWindow: DisplayWindowController?
 
@@ -29,11 +30,34 @@ final class DeviceSession {
     private var requestedBrightness: Int?
     private var maxTransferBytes = 1 << 20
     private var compressionEnabled = false
+    // The panel's mode, and the framebuffer the device takes under the
+    // current rotation (width and height swapped for 90 and 270).
+    private var panelWidth = 0
+    private var panelHeight = 0
     private var fbWidth = 0
     private var fbHeight = 0
+    // Session queue only; the touch controller reads its own copy under stateLock.
+    private var rotation: GUD.Rotation = .rotate0 {
+        didSet {
+            stateLock.lock()
+            touchRotation = rotation
+            stateLock.unlock()
+        }
+    }
+    private var touchRotation: GUD.Rotation = .rotate0
+    // Desktop mode per shape (true: landscape framebuffer).
+    private var desktops: [Bool: VirtualDisplayController.Mode] = [:]
     private var closed = false
     private(set) var displayName = "GUD Display"
-    private var currentDisplayID: CGDirectDisplayID?
+    // Session queue only; the touch controller reads its own copy under stateLock.
+    private var currentDisplayID: CGDirectDisplayID? {
+        didSet {
+            stateLock.lock()
+            touchDisplayID = currentDisplayID
+            stateLock.unlock()
+        }
+    }
+    private var touchDisplayID: CGDirectDisplayID?
 
     private var pollTimer: DispatchSourceTimer?
     private var patternTimer: DispatchSourceTimer?
@@ -105,6 +129,23 @@ final class DeviceSession {
 
     func start() {
         queue.async { [self] in
+            // The panel's touch screen, if it has one, is a sibling HID
+            // interface on the same USB device; it maps onto whatever
+            // virtual display this session currently owns.
+            let touch = TouchInputController(
+                locationID: transport.locationID,
+                serialNumber: transport.serialNumber,
+                enabled: TouchPreference.isEnabled(serialNumber: transport.serialNumber, locationID: transport.locationID)
+            ) { [weak self] in
+                guard let self else { return nil }
+                stateLock.lock()
+                defer { stateLock.unlock() }
+                return touchDisplayID.map { ($0, self.touchRotation) }
+            }
+            self.touch = touch
+            touch.start()
+            rotation = GUD.Rotation(displayDegrees: Double(RotationPreference.degrees(
+                serialNumber: transport.serialNumber, locationID: transport.locationID))) ?? .rotate0
             do {
                 try client.initialize()
                 guard let descriptor = client.descriptor else { throw GUDClientError.malformedResponse }
@@ -164,6 +205,10 @@ final class DeviceSession {
         self.format = format
 
         connectorProperties = client.connectorProperties[safe: connectorIndex] ?? []
+        if rotation != .rotate0, !client.supports(rotation) {
+            log.warning("Device offers no \(String(describing: self.rotation), privacy: .public) rotation; using none")
+            rotation = .rotate0
+        }
 
         // Enable sequence per the Linux host driver:
         // STATE_CHECK -> CONTROLLER_ENABLE -> STATE_COMMIT -> DISPLAY_ENABLE.
@@ -175,47 +220,40 @@ final class DeviceSession {
         attempt("commit") { try client.commit() }
         attempt("display enable") { try client.setDisplayEnabled(true) }
         self.mode = mode
-        fbWidth = Int(mode.hdisplay)
-        fbHeight = Int(mode.vdisplay)
+        setPanelSize(width: Int(mode.hdisplay), height: Int(mode.vdisplay))
 
-        // Modes the panel can actually run; the desktop is captured at the
-        // panel's size and downscaled from whatever mode the display sits in.
-        let deviceModes = availableModes.map {
-            VirtualDisplayController.Mode(width: Int($0.hdisplay), height: Int($0.vdisplay), refreshRate: mode.refreshRate)
-        }
-        let native = deviceModes[0]
-        // macOS treats modes narrower than 800 px as "low resolution": it
-        // never selects one while a larger mode exists, and System Settings
-        // hides a display sitting in one. A small panel therefore gets a
-        // desktop mode at the smallest aspect-preserving size that is 800 px
-        // wide, and the desktop is downscaled into the panel.
-        //
-        //   defaults write com.leftshift.gud NativeResolution -bool YES
-        // keeps the desktop pixel for pixel at the panel's size instead. The
-        // display then disappears from System Settings; the 640x480 companion
-        // exists only because macOS will not bring a display online below
-        // roughly that size.
-        var desktop = native
-        var companion: [VirtualDisplayController.Mode] = []
-        if fbWidth < 800 {
-            if UserDefaults.standard.bool(forKey: "NativeResolution") {
-                companion = [VirtualDisplayController.Mode(width: 640, height: 480, refreshRate: 60)]
-            } else {
-                let height = (800 * fbHeight / fbWidth + 1) / 2 * 2
-                desktop = VirtualDisplayController.Mode(width: 800, height: height, refreshRate: 60)
-                companion = [desktop]
+        // Modes the panel can actually run, as the host sees them, in both
+        // shapes when the device can turn the framebuffer: rotating is then
+        // a mode switch rather than a display rebuild, and picking the
+        // other shape in System Settings rotates too.
+        let shapes: [Bool] = client.supports(.rotate90) || client.supports(.rotate270) ? [false, true] : [false]
+        var deviceModes: [VirtualDisplayController.Mode] = []
+        desktops = [:]
+        var companions: [VirtualDisplayController.Mode] = []
+        for landscape in shapes {
+            for available in availableModes {
+                let (w, h) = landscape ? (Int(available.vdisplay), Int(available.hdisplay))
+                                       : (Int(available.hdisplay), Int(available.vdisplay))
+                deviceModes.append(VirtualDisplayController.Mode(width: w, height: h, refreshRate: mode.refreshRate))
             }
+            let native = deviceModes[landscape ? availableModes.count : 0]
+            let plan = Self.desktopPlan(native: native)
+            desktops[landscape] = plan.desktop
+            companions += plan.companion
         }
+        let desktop = desktops[rotation.swapsAxes] ?? deviceModes[0]
         // Larger modes are opt-in via
         //   defaults write com.leftshift.gud ScaledModes -bool YES
         // They only exist to give mirroring a shared resolution to pick
         // (macOS otherwise drags every mirrored display down to the panel's
         // mode); their content is downscaled before transfer.
+        let widest = (deviceModes + companions).map(\.width).max() ?? 0
         let scaledModes = UserDefaults.standard.bool(forKey: "ScaledModes")
             ? Self.standardModes
-                .filter { $0.width > max(fbWidth, desktop.width) }
+                .filter { $0.width > widest }
                 .map { VirtualDisplayController.Mode(width: $0.width, height: $0.height, refreshRate: 60) }
             : []
+        let companion = companions.filter { c in !deviceModes.contains { $0.width == c.width && $0.height == c.height } }
 
         var displayID: CGDirectDisplayID?
         DispatchQueue.main.sync {
@@ -241,7 +279,7 @@ final class DeviceSession {
             startTestPattern()
             return
         }
-        log.info("Virtual display \(displayID) created: panel \(self.fbWidth)x\(self.fbHeight)@\(Int(mode.refreshRate)) desktop \(desktop.width)x\(desktop.height) format \(String(describing: format), privacy: .public) lz4 \(self.compressionEnabled)")
+        log.info("Virtual display \(displayID) created: panel \(self.panelWidth)x\(self.panelHeight)@\(Int(mode.refreshRate)) desktop \(desktop.width)x\(desktop.height) format \(String(describing: format), privacy: .public) lz4 \(self.compressionEnabled) rotation \(String(describing: self.rotation), privacy: .public)")
 
         startCapture(displayID: displayID)
     }
@@ -259,6 +297,30 @@ final class DeviceSession {
             return hash == 0 ? 1 : hash
         }
         return transport.locationID == 0 ? 1 : transport.locationID
+    }
+
+    // The desktop mode for a panel shape, and any companion modes it needs.
+    // macOS treats modes narrower than 800 px as "low resolution": it
+    // never selects one while a larger mode exists, and System Settings
+    // hides a display sitting in one. A small panel therefore gets a
+    // desktop mode at the smallest aspect-preserving size that is 800 px
+    // wide, and the desktop is downscaled into the panel.
+    //
+    //   defaults write com.leftshift.gud NativeResolution -bool YES
+    // keeps the desktop pixel for pixel at the panel's size instead. The
+    // display then disappears from System Settings; the 640x480 companion
+    // exists only because macOS will not bring a display online below
+    // roughly that size.
+    static func desktopPlan(native: VirtualDisplayController.Mode)
+        -> (desktop: VirtualDisplayController.Mode, companion: [VirtualDisplayController.Mode])
+    {
+        guard native.width < 800 else { return (native, []) }
+        if UserDefaults.standard.bool(forKey: "NativeResolution") {
+            return (native, [VirtualDisplayController.Mode(width: 640, height: 480, refreshRate: 60)])
+        }
+        let height = (800 * native.height / native.width + 1) / 2 * 2
+        let desktop = VirtualDisplayController.Mode(width: 800, height: height, refreshRate: 60)
+        return (desktop, [desktop])
     }
 
     // Offered alongside the panel's native mode so macOS has usable common
@@ -301,9 +363,101 @@ final class DeviceSession {
             mode: mode,
             format: format,
             connector: UInt8(connectorIndex),
-            properties: connectorProperties
+            properties: planeProperties + connectorProperties
         )
         try client.checkState(state)
+    }
+
+    // The device's plane properties as reported, with rotation set to ours.
+    // The whole set goes with every state, as the Linux host sends it.
+    private var planeProperties: [GUD.Property] {
+        client.planeProperties.map { property in
+            property.prop == GUD.Property.rotation
+                ? GUD.Property(prop: property.prop, val: rotation.rawValue)
+                : property
+        }
+    }
+
+    // Session queue.
+    private func setPanelSize(width: Int, height: Int) {
+        panelWidth = width
+        panelHeight = height
+        let fb = rotation.framebufferSize(width: width, height: height)
+        fbWidth = fb.width
+        fbHeight = fb.height
+    }
+
+    // MARK: Rotation
+
+    // macOS shows no Rotation control for a virtual display, so the app
+    // owns it: the display is created in the turned shape, the device is
+    // told through the GUD rotation property and turns the framebuffer in
+    // hardware, and touch is turned to match. Only offered when the device
+    // advertises the property.
+    var rotationChoices: [GUD.Rotation] {
+        GUD.Rotation.allCases.filter(client.supports)
+    }
+
+    var currentRotation: GUD.Rotation {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return touchRotation
+    }
+
+    // Menu-driven; remembered per device. The device is turned first, then
+    // the display is switched to the desktop mode of the new shape, which
+    // costs one mode change rather than a display rebuild.
+    func setRotation(_ wanted: GUD.Rotation) {
+        RotationPreference.setDegrees(wanted.displayDegrees,
+                                      serialNumber: transport.serialNumber, locationID: transport.locationID)
+        queue.async { [self] in
+            guard !closed, wanted != rotation, client.supports(wanted), let mode, let displayID = currentDisplayID else { return }
+            capture.stop()
+            let previous = rotation
+            rotation = wanted
+            do {
+                try applyState(mode)
+                try client.commit()
+            } catch {
+                rotation = previous
+                log.error("Device declined rotation \(String(describing: wanted), privacy: .public): \(String(describing: error), privacy: .public)")
+                startCapture(displayID: displayID)
+                return
+            }
+            setPanelSize(width: panelWidth, height: panelHeight)
+            log.info("Rotation \(String(describing: wanted), privacy: .public); framebuffer \(self.fbWidth)x\(self.fbHeight)")
+            if previous.swapsAxes != wanted.swapsAxes, let desktop = desktops[wanted.swapsAxes] {
+                virtualDisplay.selectMode(width: desktop.width, height: desktop.height, on: displayID)
+            }
+            startCapture(displayID: displayID)
+        }
+    }
+
+    // Session queue. The user picked a mode of the other shape in System
+    // Settings: turn the device to match, keeping the last landscape choice.
+    private func adoptRotation(landscape: Bool) {
+        guard let mode, let displayID = currentDisplayID else { return }
+        var wanted: GUD.Rotation = landscape ? .rotate270 : .rotate0
+        if landscape, let remembered = GUD.Rotation(displayDegrees: Double(RotationPreference.degrees(
+            serialNumber: transport.serialNumber, locationID: transport.locationID))), remembered.swapsAxes {
+            wanted = remembered
+        }
+        guard client.supports(wanted) else { return }
+        capture.stop()
+        let previous = rotation
+        rotation = wanted
+        do {
+            try applyState(mode)
+            try client.commit()
+            RotationPreference.setDegrees(wanted.displayDegrees,
+                                          serialNumber: transport.serialNumber, locationID: transport.locationID)
+        } catch {
+            rotation = previous
+            log.error("Device declined rotation \(String(describing: wanted), privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+        setPanelSize(width: panelWidth, height: panelHeight)
+        log.info("Display shape changed; rotation \(String(describing: self.rotation), privacy: .public), framebuffer \(self.fbWidth)x\(self.fbHeight)")
+        startCapture(displayID: displayID)
     }
 
     // MARK: Backlight
@@ -495,19 +649,31 @@ final class DeviceSession {
             }
         }
 
-        guard let screen = NSScreen.screens.first(where: { $0.displayID == displayID }) else { return }
-        let scale = screen.backingScaleFactor
-        let pixelWidth = Int(screen.frame.width * scale)
-        let pixelHeight = Int(screen.frame.height * scale)
         queue.async { [self] in
-            guard pixelWidth != fbWidth || pixelHeight != fbHeight else { return }
-            // A resolution the device itself can run: renegotiate the panel.
-            // Anything else is one of our scaled modes — the panel keeps its
-            // native timing and ScreenCaptureKit downscales into it.
-            if let newMode = availableModes.first(where: { Int($0.hdisplay) == pixelWidth && Int($0.vdisplay) == pixelHeight }) {
-                switchMode(to: newMode)
-            } else {
-                log.info("Display now \(pixelWidth, privacy: .public)x\(pixelHeight, privacy: .public); scaling to panel \(self.fbWidth, privacy: .public)x\(self.fbHeight, privacy: .public)")
+            guard !closed else { return }
+            // Notifications come several times during a reconfiguration, some
+            // with stale frames; the display's mode is the settled truth.
+            guard let current = CGDisplayCopyDisplayMode(displayID) else { return }
+            var pixelWidth = current.pixelWidth
+            var pixelHeight = current.pixelHeight
+            let swappedShape = (pixelWidth > pixelHeight) != (panelWidth > panelHeight)
+            if panelWidth != panelHeight, desktops.count > 1, swappedShape != rotation.swapsAxes {
+                adoptRotation(landscape: swappedShape)
+                return
+            }
+            // The display is in the framebuffer's shape; modes are the panel's.
+            if rotation.swapsAxes {
+                swap(&pixelWidth, &pixelHeight)
+            }
+            if pixelWidth != panelWidth || pixelHeight != panelHeight {
+                // A resolution the device itself can run: renegotiate the panel.
+                // Anything else is one of our scaled modes — the panel keeps its
+                // native timing and ScreenCaptureKit downscales into it.
+                if let newMode = availableModes.first(where: { Int($0.hdisplay) == pixelWidth && Int($0.vdisplay) == pixelHeight }) {
+                    switchMode(to: newMode)
+                } else {
+                    log.info("Display now \(pixelWidth, privacy: .public)x\(pixelHeight, privacy: .public); scaling to panel \(self.panelWidth, privacy: .public)x\(self.panelHeight, privacy: .public)")
+                }
             }
         }
     }
@@ -524,9 +690,8 @@ final class DeviceSession {
             return
         }
         mode = newMode
-        fbWidth = Int(newMode.hdisplay)
-        fbHeight = Int(newMode.vdisplay)
-        log.info("Switched to \(self.fbWidth)x\(self.fbHeight)")
+        setPanelSize(width: Int(newMode.hdisplay), height: Int(newMode.vdisplay))
+        log.info("Switched to \(self.panelWidth)x\(self.panelHeight)")
         if let displayID = currentDisplayID {
             startCapture(displayID: displayID)
         }
@@ -548,8 +713,31 @@ final class DeviceSession {
         (fbWidth, fbHeight)
     }
 
+    var touchStatus: String? {
+        touch?.status
+    }
+
+    // The device has a touch screen the app can drive.
+    var touchAvailable: Bool {
+        touch?.available ?? false
+    }
+
+    // Menu toggle; remembered per device.
+    var touchEnabled: Bool {
+        get { touch?.enabled ?? false }
+        set {
+            touch?.enabled = newValue
+            TouchPreference.setEnabled(newValue, serialNumber: transport.serialNumber, locationID: transport.locationID)
+        }
+    }
+
     var modeChoices: [(width: Int, height: Int)] {
         availableModes.map { (Int($0.hdisplay), Int($0.vdisplay)) }
+    }
+
+    // Menu check marks compare against the panel mode, not the framebuffer.
+    var currentPanelSize: (width: Int, height: Int) {
+        (panelWidth, panelHeight)
     }
 
     // MARK: Connector status polling
@@ -874,6 +1062,7 @@ final class DeviceSession {
             patternTimer?.cancel()
             patternTimer = nil
             capture.stop()
+            touch?.stop()
             if !deviceGone {
                 try? client.setDisplayEnabled(false)
                 try? client.setControllerEnabled(false)

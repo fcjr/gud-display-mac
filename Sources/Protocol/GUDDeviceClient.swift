@@ -29,6 +29,8 @@ final class GUDDeviceClient {
     private(set) var formats: [GUD.PixelFormat] = []
     private(set) var connectors: [GUD.Connector] = []
     private(set) var connectorProperties: [[GUD.Property]] = []
+    // Plane properties from GET_PROPERTIES; rotation is the one used.
+    private(set) var planeProperties: [GUD.Property] = []
 
     private var statusOnSet: Bool {
         descriptor?.flags.contains(.statusOnSet) ?? false
@@ -68,9 +70,12 @@ final class GUDDeviceClient {
         let formatData = try controlIn(.getFormats, length: 32)
         formats = formatData.compactMap { GUD.PixelFormat(rawValue: $0) }
 
-        // Plane properties (rotation). Unknown properties must be skipped for
-        // forward compatibility; we currently use none of them.
-        _ = try? controlIn(.getProperties, length: 32 * GUD.Property.byteSize)
+        // Plane properties. Unknown ones are kept and resent untouched with
+        // every state, as the protocol asks; only rotation is interpreted.
+        let planeData = (try? controlIn(.getProperties, length: 32 * GUD.Property.byteSize)) ?? Data()
+        planeProperties = stride(from: 0, to: planeData.count, by: GUD.Property.byteSize).compactMap {
+            GUD.Property(parsing: planeData, at: $0)
+        }
 
         let connectorData = try controlIn(.getConnectors, length: 32 * GUD.Connector.byteSize)
         connectors = stride(from: 0, to: connectorData.count, by: GUD.Connector.byteSize).compactMap {
@@ -83,6 +88,18 @@ final class GUDDeviceClient {
                 GUD.Property(parsing: data, at: $0)
             }
         }
+    }
+
+    // Rotations the device offers, as a GUD.Rotation bitmask; 0 when the
+    // property is absent (or malformed: ROTATE_0 is mandatory).
+    var supportedRotations: UInt64 {
+        guard let property = planeProperties.first(where: { $0.prop == GUD.Property.rotation }) else { return 0 }
+        let bits = property.val & GUD.Rotation.mask
+        return bits & GUD.Rotation.rotate0.rawValue != 0 ? bits : 0
+    }
+
+    func supports(_ rotation: GUD.Rotation) -> Bool {
+        supportedRotations & rotation.rawValue != 0
     }
 
     // Cheap EP0 liveness check (GET_DESCRIPTOR is supported by every device).

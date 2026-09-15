@@ -57,9 +57,9 @@ final class DeviceSession {
     // replaced frame changed are carried into the next diff, so no dirty
     // region is ever silently dropped.
     private let stateLock = NSLock()
-    private var pendingSlot: Int?
-    private var readingSlot: Int?
-    private var flushInFlight = false
+    private var handoff = FrameHandoff()
+    // Session queue only: coalesce USB errors into one delayed capture restart.
+    private var flushRecoveryScheduled = false
 
     // One transfer: a band of one damage rect, already in the device format
     // and (when it helps) LZ4 compressed, so the flush queue only moves bytes.
@@ -642,16 +642,27 @@ final class DeviceSession {
         // A packed frame the flush loop hasn't taken yet is about to be
         // replaced: whatever it changed must ride along with this one.
         stateLock.lock()
-        let slot = readingSlot == 0 ? 1 : 0
-        if let pending = pendingSlot, pending == slot {
+        let claim = handoff.beginCapture()
+        let slot = claim.slot
+        if let pending = claim.replaced {
             damageTracker?.carry(tiles: slots[pending].tiles)
         }
         stateLock.unlock()
 
+        var published = false
+        defer {
+            // Preserve damage if a claimed pending frame could not be packed.
+            if !published && (claim.redraw || claim.replaced != nil) {
+                stateLock.lock()
+                handoff.requestRedraw()
+                stateLock.unlock()
+            }
+        }
+
         // Devices that need every flush to be the whole framebuffer, or the
         // debugging default, force full damage. ScreenCaptureKit's own dirty
         // rects are unusable here: a scaled stream reports none.
-        let forceFull = frame.isFirstFrame || Self.fullFrameOnly
+        let forceFull = claim.redraw || frame.isFirstFrame || Self.fullFrameOnly
             || client.descriptor?.flags.contains(.fullUpdate) == true
 
         // Everything that reads the IOSurface happens HERE, on the sample
@@ -704,9 +715,8 @@ final class DeviceSession {
         guard !frameSlot.transfers.isEmpty else { return }
 
         stateLock.lock()
-        pendingSlot = slot
-        let shouldStart = !flushInFlight
-        if shouldStart { flushInFlight = true }
+        let shouldStart = handoff.publish(slot)
+        published = true
         stateLock.unlock()
 
         guard shouldStart else { return }
@@ -718,22 +728,23 @@ final class DeviceSession {
     private func flushLoop() {
         while true {
             stateLock.lock()
-            guard let slot = pendingSlot else {
-                flushInFlight = false
+            guard let slot = handoff.beginFlush() else {
                 stateLock.unlock()
                 return
             }
-            pendingSlot = nil
-            readingSlot = slot
             stateLock.unlock()
 
             let started = Date()
-            let (bytes, pixelBytes) = flushFrame(slots[slot].transfers)
-            noteFlushDuration(Date().timeIntervalSince(started))
-            recordFlush(bytes: bytes, pixelBytes: pixelBytes)
+            let result = flushFrame(slots[slot].transfers)
+            if result.complete {
+                noteFlushDuration(Date().timeIntervalSince(started))
+                recordFlush(bytes: result.bytes, pixelBytes: result.pixelBytes)
+            } else {
+                recoverFailedFlush()
+            }
 
             stateLock.lock()
-            readingSlot = nil
+            handoff.finishFlush()
             lastFlushAt = Date()
             stateLock.unlock()
         }
@@ -744,10 +755,9 @@ final class DeviceSession {
     // unfinished payloads. Capture still packs the next frame concurrently.
     // Count only completed transfers.
     //
-    // Error policy matches the Linux gud driver (gud_flush_damage): a failed
-    // transfer abandons the rest of the frame, is logged rate-limited, and the
-    // next damage tries again. No retry, no ping, no reset, no rate change.
-    private func flushFrame(_ transfers: [PendingTransfer]) -> (bytes: Int, pixelBytes: Int) {
+    // A failed transfer abandons the rest of this frame. Recovery requests a
+    // fresh complete frame, even when the desktop has stopped changing.
+    private func flushFrame(_ transfers: [PendingTransfer]) -> (bytes: Int, pixelBytes: Int, complete: Bool) {
         var bytes = 0
         var pixelBytes = 0
         for transfer in transfers {
@@ -760,10 +770,32 @@ final class DeviceSession {
                 pixelBytes += transfer.uncompressedLength
             } catch {
                 logFlushError(error, transfer)
-                break
+                return (bytes, pixelBytes, false)
             }
         }
-        return (bytes, pixelBytes)
+        return (bytes, pixelBytes, true)
+    }
+
+    private func recoverFailedFlush() {
+        stateLock.lock()
+        handoff.requestRedraw()
+        stateLock.unlock()
+        queue.async { [weak self] in
+            guard let self, !closed, !flushRecoveryScheduled else { return }
+            flushRecoveryScheduled = true
+            queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+                guard let self else { return }
+                flushRecoveryScheduled = false
+                guard !closed else { return }
+                stateLock.lock()
+                handoff.requestRedraw()
+                stateLock.unlock()
+                // Restart guarantees a fresh sample on an otherwise static
+                // desktop. No partial payload is retried in place.
+                log.info("Restarting capture for a full redraw after USB failure")
+                restartCapture()
+            }
+        }
     }
 
     private func logFlushError(_ error: Error, _ t: PendingTransfer) {

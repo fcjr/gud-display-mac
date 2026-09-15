@@ -28,6 +28,17 @@
     <description>Updates for GUD Display for macOS</description>
     <language>en</language>
     <item>
+      <title>0.2.1</title>
+      <sparkle:version>0.2.1</sparkle:version>
+      <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <pubDate>Tue, 15 Sep 2026 04:07:04 +0000</pubDate>
+      <enclosure
+        url="https://github.com/fcjr/gud-display-mac/releases/download/v0.2.1/GUD-Display-0.2.1.zip"
+        sparkle:edSignature="eQdWyndOcFu63dakkd3ivSPUU1XHNH48BSdRUofIA1LvYoo1r9F4IKTPUQi1y71RUfC81ZIhmONMJqOejuFiAQ==" length="2525197"
+        type="application/octet-stream"/>
+    </item>
+    <item>
       <title>0.2.0</title>
       <sparkle:version>0.2.0</sparkle:version>
       <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>

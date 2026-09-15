@@ -23,8 +23,10 @@ targets:
         # GUDDisplay so command-line invocations need no quoting.
         PRODUCT_NAME: GUD Display
         PRODUCT_MODULE_NAME: GUDDisplay
+        # Sparkle compares the appcast's sparkle:version against
+        # CFBundleVersion, not the marketing version, so the two must match.
         MARKETING_VERSION: 0.2.1
-        CURRENT_PROJECT_VERSION: 1
+        CURRENT_PROJECT_VERSION: $(MARKETING_VERSION)
         PRODUCT_BUNDLE_IDENTIFIER: com.leftshift.gud
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridging/GUDDisplay-Bridging-Header.h

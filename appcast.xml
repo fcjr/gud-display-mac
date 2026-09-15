@@ -7,6 +7,10 @@
   The tag triggers release.yml, which builds, notarizes, publishes the GitHub
   release, appends an <item> here, and updates the Homebrew cask.
 
+  Releases up to 0.2.1 shipped with CFBundleVersion 1, which Sparkle ranks
+  above every dotted sparkle:version here, so those installs never update on
+  their own and need a manual reinstall once.
+
   Item template:
     <item>
       <title>0.1.1</title>

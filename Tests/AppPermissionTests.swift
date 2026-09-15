@@ -5,8 +5,10 @@ final class AppPermissionTests: XCTestCase {
     func testEveryPermissionHasASettingsPaneAndChecksWithoutPrompting() {
         XCTAssertEqual(AppPermission.allCases.count, 3)
         for permission in AppPermission.allCases {
-            XCTAssertEqual(permission.settingsURL.scheme, "x-apple.systempreferences")
-            XCTAssertEqual(permission.settingsURL.query, permission.settingsPane)
+            // Foundation versions disagree on how to split this scheme's URL,
+            // so check the string the system will actually open.
+            XCTAssertEqual(permission.settingsURL.absoluteString,
+                           "x-apple.systempreferences:com.apple.preference.security?" + permission.settingsPane)
             XCTAssertFalse(permission.name.isEmpty)
             XCTAssertFalse(permission.purpose.isEmpty)
             // A plain query under the test host: must not hang or prompt.

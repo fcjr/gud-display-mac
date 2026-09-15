@@ -152,3 +152,20 @@ synthetic mouse events). Neither can be verified without the hardware: the
 seize itself and whether the kernel's element values are current by the time
 the raw report callback runs were designed from IOHIDFamily's behaviour, not
 observed here.
+
+## Rotation
+
+CGVirtualDisplay gets no Rotation control in System Settings › Displays,
+and neither CoreGraphics nor SkyLight exports a way to set one. Rotation is
+therefore done as a mode switch: the display is created with desktop modes
+for both shapes, the device is turned through the GUD rotation property
+(DRM's counter-clockwise bits; the menu shows macOS's clockwise degrees, so
+90° is `ROTATE_270`), and the display is switched to the other desktop mode.
+Destroying and recreating the display instead froze the whole desktop for a
+couple of seconds twice over, once per reconfiguration.
+
+Two things bit on the way. `CGDisplaySetDisplayMode` selection must compare
+both dimensions, since both desktop modes are 800 wide. And
+`didChangeScreenParametersNotification` arrives several times during a
+reconfiguration, one of them with a stale screen frame; handling it from
+`CGDisplayCopyDisplayMode` on the session queue gives the settled state.

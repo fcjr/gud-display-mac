@@ -22,7 +22,11 @@ Requires macOS 14 (Sonoma) or later. Builds are signed and notarized, and the ap
 2. Grant **Screen Recording** permission when prompted (System Settings › Privacy & Security › Screen Recording), then relaunch. macOS treats mirroring the virtual display as screen recording, so without it the device shows a black screen.
 3. Plug in your GUD device. A new display appears in System Settings › Displays and you can arrange it like any other monitor.
 
-The menu bar item shows the connected device, lets you pick a resolution from the modes the device advertises, and toggles Launch at Login. Devices that advertise the GUD rotation property also get a **Rotation** submenu: macOS shows no Rotation control for a virtual display, so the app rebuilds the display in the turned shape, sends the rotation to the device, which turns the framebuffer in hardware, and turns touch to match. The choice is remembered per device. Its **Permissions** section checks Screen Recording, Input Monitoring and Accessibility every time the menu opens; a missing one is a button that opens the System Settings pane where it is granted, and missing ones are repeated at the top of the menu.
+The menu bar item shows the connected device with its panel size and rotation, lets you pick a resolution from the modes the device advertises, and toggles Launch at Login. Its **Permissions** section checks Screen Recording, Input Monitoring and Accessibility every time the menu opens; a missing one is a button that opens the System Settings pane where it is granted, and missing ones are repeated at the top of the menu.
+
+### Rotation
+
+Devices that advertise the GUD rotation property get a **Rotation** submenu with 0°, 90°, 180° and 270°, remembered per device. macOS shows no Rotation control for a virtual display, so the app does the work: the display is created with desktop modes for both shapes, rotating sends the rotation to the device, which turns the framebuffer in hardware, and switches the display to the matching desktop mode, the same cost as a resolution change. Because both shapes are listed, picking the landscape resolution for the display in System Settings › Displays rotates the panel too, and picking the portrait one turns it back. Touch is turned with it. Devices without the property keep their fixed orientation.
 
 For a small panel, choose **Open Display Window** under that device in the
 menu. This opens a live view on your main screen. Resizing keeps the display's
@@ -67,7 +71,7 @@ defines it: partial rectangles, `max_buffer_size` bands, standard LZ4 blocks.
 
 ## Status
 
-Tested against the RCade adapter driving a CRT at its native 336×262. Other GUD devices (gud-gadget on a Pi or phone, Pico and ESP32 boards) should work but have not been verified; if you have one, please open an issue with what you see. See [docs/hardware-notes.md](docs/hardware-notes.md) for device findings.
+Tested against the RCade adapter driving a CRT at its native 336×262, and against [gudlet](https://github.com/fcjr/gudlet) on the Waveshare ESP32-S3-Touch-LCD-1.69, including touch and rotation. Other GUD devices (gud-gadget on a Pi or phone, other Pico and ESP32 boards) should work but have not been verified; if you have one, please open an issue with what you see. See [docs/hardware-notes.md](docs/hardware-notes.md) for device findings.
 
 ## Building
 

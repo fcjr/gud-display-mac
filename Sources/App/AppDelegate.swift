@@ -77,8 +77,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(disabledItem("No GUD displays connected"))
         } else {
             for (key, session) in sessions {
-                let size = session.currentPixelSize
-                menu.addItem(disabledItem("\(session.displayName) — \(size.width)×\(size.height)"))
+                let panel = session.currentPanelSize
+                let rotation = session.currentRotation
+                let turned = rotation == .rotate0 ? "" : ", rotated \(rotation.displayDegrees)°"
+                menu.addItem(disabledItem("\(session.displayName) — \(panel.width)×\(panel.height)\(turned)"))
                 menu.addItem(disabledItem("    " + statsLine(for: key, session: session)))
                 if let status = session.touchStatus {
                     menu.addItem(touchItem(status))
@@ -103,7 +105,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                           action: #selector(selectResolution(_:)), keyEquivalent: "")
                     item.target = self
                     item.representedObject = ResolutionChoice(session: session, width: choice.width, height: choice.height)
-                    let panel = session.currentPanelSize
                     item.state = choice.width == panel.width && choice.height == panel.height ? .on : .off
                     resolutionMenu.addItem(item)
                 }

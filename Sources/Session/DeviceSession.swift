@@ -47,6 +47,7 @@ final class DeviceSession {
     private var touchRotation: GUD.Rotation = .rotate0
     // Desktop mode per shape (true: landscape framebuffer).
     private var desktops: [Bool: VirtualDisplayController.Mode] = [:]
+    private var loggedDesktop: (width: Int, height: Int)?
     private var closed = false
     private(set) var displayName = "GUD Display"
     // Session queue only; the touch controller reads its own copy under stateLock.
@@ -671,8 +672,9 @@ final class DeviceSession {
                 // native timing and ScreenCaptureKit downscales into it.
                 if let newMode = availableModes.first(where: { Int($0.hdisplay) == pixelWidth && Int($0.vdisplay) == pixelHeight }) {
                     switchMode(to: newMode)
-                } else {
-                    log.info("Display now \(pixelWidth, privacy: .public)x\(pixelHeight, privacy: .public); scaling to panel \(self.panelWidth, privacy: .public)x\(self.panelHeight, privacy: .public)")
+                } else if loggedDesktop.map({ $0 != (current.pixelWidth, current.pixelHeight) }) ?? true {
+                    loggedDesktop = (current.pixelWidth, current.pixelHeight)
+                    log.info("Desktop \(current.pixelWidth, privacy: .public)x\(current.pixelHeight, privacy: .public) scaled into the \(self.fbWidth, privacy: .public)x\(self.fbHeight, privacy: .public) framebuffer")
                 }
             }
         }
@@ -707,10 +709,6 @@ final class DeviceSession {
             else { return }
             CGDisplaySetDisplayMode(displayID, target, nil)
         }
-    }
-
-    var currentPixelSize: (width: Int, height: Int) {
-        (fbWidth, fbHeight)
     }
 
     var touchStatus: String? {
